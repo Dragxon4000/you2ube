@@ -199,3 +199,17 @@ an empty shell with only a `README.md`. No `CLAUDE.md` exists anywhere to
 supply the missing instructions. Per the task's explicit constraints, no
 features have been implemented and no existing code has been rewritten —
 this document is audit-only.
+Summary
+I implemented a single, self-hosted, credentials-based authentication system for this Next.js + PostgreSQL/Drizzle project (the repo was actually just the blank starter template — no pre-existing auth, middleware, or RLS to reuse or conflict with, so this is the one and only architecture).
+
+Database schema (src/db/schema.ts): users, profiles (auto-created 1:1 with each user), sessions (hashed opaque tokens), and verification_tokens (shared by email verification + password reset, single-use, expiring). Pushed live via drizzle-kit push.
+
+Core auth library (src/lib/auth/): bcrypt password hashing, SHA-256-hashed session/verification tokens, createSession/getSessionUser/destroySession helpers, and an atomic createUserWithProfile transaction.
+
+API routes: /api/auth/{signup,login,logout,me,forgot-password,reset-password,verify-email,resend-verification} — all validating input, using httpOnly/secure/sameSite cookies.
+
+Routing/UI: /login, /signup, /forgot-password, /reset-password, /verify-email, and a protected /dashboard showing profile data with logout.
+
+Middleware: implemented as src/proxy.ts (Next.js 16's stable replacement for middleware.ts, running on the Node.js runtime) — it queries the DB directly to guard /dashboard/* and bounce authenticated users away from /login//signup.
+
+OAuth/email: no OAuth or email-provider secrets were configured in this environment, so OAuth was skipped per the rules, and email verification/password-reset links are fully functional but delivered via server console logging instead of a real inbox (clearly documented in code/UI).

@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   pgTable,
   text,
   timestamp,
@@ -42,24 +43,39 @@ export const profiles = pgTable("profiles", {
 // Server-side session store. The cookie only ever holds the raw opaque
 // token; we persist a SHA-256 hash of it here so a DB leak can't be used to
 // hijack sessions directly.
-export const sessions = pgTable("sessions", {
-  id: text("id").primaryKey(), // sha256(token) hex digest
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(), // sha256(token) hex digest
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Speeds up "delete all sessions for user" (logout-everywhere / password reset)
+    // and any future "list sessions for user" queries.
+    index("sessions_user_id_idx").on(table.userId),
+  ],
+);
 
 // Shared table for both email verification and password reset flows.
-export const verificationTokens = pgTable("verification_tokens", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id")
-    .notNull()
-    .references(() => users.id, { onDelete: "cascade" }),
-  tokenHash: text("token_hash").notNull().unique(),
-  type: text("type", { enum: ["email_verification", "password_reset"] }).notNull(),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  usedAt: timestamp("used_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const verificationTokens = pgTable(
+  "verification_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    type: text("type", { enum: ["email_verification", "password_reset"] }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // Speeds up "find valid token for user" / cleanup-by-user queries.
+    index("verification_tokens_user_id_idx").on(table.userId),
+  ],
+);

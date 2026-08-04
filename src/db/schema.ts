@@ -36,7 +36,17 @@ export const profiles = pgTable("profiles", {
     .unique()
     .references(() => users.id, { onDelete: "cascade" }),
   displayName: text("display_name").notNull(),
+  bio: text("bio"),
+  location: text("location"),
+  websiteUrl: text("website_url"),
   avatarUrl: text("avatar_url"),
+  avatarPath: text("avatar_path"),
+  profileVisibility: text("profile_visibility", { enum: ["public", "friends", "private"] })
+    .notNull()
+    .default("public"),
+  showWatchHistory: boolean("show_watch_history").notNull().default(true),
+  showXp: boolean("show_xp").notNull().default(true),
+  showAchievements: boolean("show_achievements").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

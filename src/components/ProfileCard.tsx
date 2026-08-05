@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
 
 interface ProfileData {
   user: {
@@ -68,13 +69,21 @@ export function ProfileCard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/profile")
+    const controller = new AbortController();
+    fetch("/api/profile", { signal: controller.signal })
       .then(r => r.json())
       .then(d => {
-        setData(d);
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setData(d);
+          setLoading(false);
+        }
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        if (err.name !== "AbortError" && !controller.signal.aborted) {
+          setLoading(false);
+        }
+      });
+    return () => controller.abort();
   }, []);
 
   if (loading || !data) {
@@ -103,11 +112,14 @@ export function ProfileCard() {
         <div className="flex items-start gap-6">
           {/* Avatar — Discord image when linked, else emoji */}
           {discord.linked && discord.avatarUrl ? (
-            <img
+            <Image
               src={discord.avatarUrl}
-              alt={discord.globalName ?? discord.username}
-              className="h-24 w-24 rounded-full object-cover shadow-lg ring-4"
+              alt={discord.globalName ?? discord.username ?? "Discord avatar"}
+              width={96}
+              height={96}
+              className="rounded-full object-cover shadow-lg ring-4"
               style={{ borderColor: level.colorHex, boxShadow: `0 0 0 4px ${level.colorHex}30` }}
+              unoptimized // Discord CDN already serves optimized avatars via ?size=
             />
           ) : (
             <div

@@ -15,11 +15,26 @@ import { useDesktopNavigation } from "@/lib/desktop";
 
 type Tab = "profile" | "achievements" | "badges" | "rewards" | "leaderboard" | "notifications" | "discord";
 
+interface DiscordInfo {
+  linked: boolean;
+  username?: string;
+  globalName?: string | null;
+  avatarUrl?: string;
+  linkedAt?: string;
+  notifyLevelUps?: boolean;
+  notifyAchievements?: boolean;
+  notifyBadges?: boolean;
+  richPresenceEnabled?: boolean;
+}
+
 function DiscordTab({ onLinkChange }: { onLinkChange: () => void }) {
-  const [discord, setDiscord] = useState<any>(null);
+  const [discord, setDiscord] = useState<DiscordInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const load = () => {
+  // Reload logic for user-triggered refreshes (e.g., after linking Discord).
+  // Sets loading=true synchronously, then fetches. This is safe because it's
+  // called from event handlers, not effects.
+  const reloadDiscord = () => {
     setLoading(true);
     fetch("/api/profile")
       .then(r => r.json())
@@ -30,10 +45,27 @@ function DiscordTab({ onLinkChange }: { onLinkChange: () => void }) {
       .catch(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  // Initial load — inline the fetch so the linter can see that setState is
+  // only called asynchronously (inside .then()), not synchronously in the
+  // effect body. This satisfies the React 19 "no setState in effect" rule.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/profile")
+      .then(r => r.json())
+      .then(d => {
+        if (!cancelled) {
+          setDiscord(d.discord);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleLinkChange = () => {
-    load();
+    reloadDiscord();
     onLinkChange();
   };
 

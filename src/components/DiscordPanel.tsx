@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import Image from "next/image";
 import {
   connectDiscordRpc,
   buildWatchingActivity,
@@ -185,10 +186,13 @@ export function DiscordPanel({
       {/* Linked identity card */}
       <div className="rounded-3xl bg-white p-8 shadow-lg">
         <div className="flex items-start gap-4">
-          <img
-            src={discord.avatarUrl}
-            alt={discord.username}
-            className="h-20 w-20 rounded-full ring-4 ring-indigo-100"
+          <Image
+            src={discord.avatarUrl ?? ""}
+            alt={discord.username ?? "Discord avatar"}
+            width={80}
+            height={80}
+            className="rounded-full ring-4 ring-indigo-100"
+            unoptimized // Discord CDN already serves optimized avatars via ?size=
           />
           <div className="flex-1">
             <div className="text-sm text-slate-500">Connected as</div>
@@ -250,7 +254,7 @@ export function DiscordPanel({
       <div className="rounded-3xl bg-white p-8 shadow-lg">
         <h3 className="text-xl font-bold text-slate-900 mb-1">🎯 Rich Presence</h3>
         <p className="text-sm text-slate-600 mb-5">
-          Show what you're watching on you2ube as your Discord status. Requires the Discord desktop app to be running.
+          Show what you&apos;re watching on you2ube as your Discord status. Requires the Discord desktop app to be running.
         </p>
         <Toggle
           label="Enable Rich Presence"

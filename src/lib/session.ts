@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { db } from "@/db";
 import { users, notifications } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -24,21 +24,39 @@ const SESSION_CREATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const SESSION_CREATE_LIMIT = 20;
 const sessionCreateBuckets = new Map<string, number[]>();
 
-function getIpFromRequest(): string {
-  // Best-effort IP detection — Next.js doesn't expose req.ip on the edge,
-  // so we read common proxy headers. Falls back to "unknown".
-  // NOTE: in production behind a proxy, trust the proxy by setting the
-  // `trustProxy` option on the server or use a reverse proxy that sets
-  // X-Forwarded-For.
-  return (
-    process.env.NODE_ENV === "test"
-      ? "test-ip"
-      : "unknown-ip"
-  );
+async function getIpFromRequest(): Promise<string> {
+  // Read the client IP from standard proxy headers.
+  // In production behind a reverse proxy (nginx, Cloudflare, Vercel), the
+  // proxy sets X-Forwarded-For or X-Real-IP. We trust the first IP in the
+  // chain (the client) because the proxy overwrites it.
+  //
+  // SECURITY: Only trust these headers if you control the proxy. If your
+  // app is directly exposed to the internet, attackers can spoof these
+  // headers. In that case, configure your proxy to set a custom header
+  // (e.g., X-Client-IP) and read that instead.
+  try {
+    const headersList = await headers();
+    const forwarded = headersList.get("x-forwarded-for");
+    if (forwarded) {
+      // X-Forwarded-For can contain multiple IPs: "client, proxy1, proxy2"
+      // Take the first one (the original client).
+      const first = forwarded.split(",")[0].trim();
+      if (first) return first;
+    }
+    const realIp = headersList.get("x-real-ip");
+    if (realIp) return realIp;
+    // Fallback: use a stable identifier so the rate limiter still works
+    // (even if imperfectly) in dev/test environments without a proxy.
+    return process.env.NODE_ENV === "test" ? "test-ip" : "dev-fallback";
+  } catch {
+    // headers() can throw if called outside a request context (e.g., in
+    // server components during build). Fall back to a stable identifier.
+    return "unknown-context";
+  }
 }
 
-function canCreateSession(): boolean {
-  const ip = getIpFromRequest();
+async function canCreateSession(): Promise<boolean> {
+  const ip = await getIpFromRequest();
   const now = Date.now();
   const windowStart = now - SESSION_CREATE_WINDOW_MS;
 
@@ -132,7 +150,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
   if (!sessionId) {
     // Rate limit session creation to prevent abuse.
-    if (!canCreateSession()) {
+    if (!(await canCreateSession())) {
       log("warn", "Session creation rate limit exceeded");
       return null;
     }

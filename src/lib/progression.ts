@@ -320,12 +320,15 @@ async function awardXpInTx(tx: Tx, opts: AwardXpOptions): Promise<AwardXpResult>
     sql`SELECT id, xp, level, total_videos_watched, total_parties_hosted, total_friends_invited
         FROM users WHERE id = ${opts.userId} FOR UPDATE`,
   );
-  // node-postgres returns a QueryResult; the rows live on `.rows`.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rows = (userRows as any).rows as Array<{
+  // Drizzle's `execute()` returns a driver-specific QueryResult whose shape
+  // isn't exposed in the public types. node-postgres puts the rows on `.rows`.
+  type UserRow = {
     id: number; xp: number; level: number;
     total_videos_watched: number; total_parties_hosted: number; total_friends_invited: number;
-  }>;
+  };
+  const rows: UserRow[] = Array.isArray(userRows)
+    ? (userRows as unknown as UserRow[])
+    : (userRows as unknown as { rows: UserRow[] }).rows;
   const userRow = rows[0];
   if (!userRow) throw new Error(`User ${opts.userId} not found`);
   const user = {

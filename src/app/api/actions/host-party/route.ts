@@ -39,6 +39,9 @@ export async function POST(req: Request) {
 
     const idemKey = typeof idempotencyKey === "string" ? idempotencyKey : undefined;
     const idemCheck = await checkIdempotencyKey(user.id, idemKey);
+    if (idemCheck.invalid) {
+      return apiError(400, ErrorCode.INVALID_INPUT, "idempotencyKey must be 8–128 chars, alphanumeric with _ or -");
+    }
     if (idemCheck.duplicate) {
       return NextResponse.json({
         success: true,

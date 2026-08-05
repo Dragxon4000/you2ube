@@ -120,16 +120,39 @@ export async function parseJsonBody<T = unknown>(req: Request): Promise<
 // Idempotency: if a client retries a POST that previously succeeded,
 // return the cached result rather than re-executing (prevents double XP).
 // ============================================================================
+export interface IdempotencyCheckResult {
+  /** True if this exact (user, key) pair was already processed. */
+  duplicate: boolean;
+  /** The XP amount from the original request (only set when duplicate=true). */
+  existingAmount?: number;
+  /** True if the key was malformed and rejected — caller should 400. */
+  invalid?: boolean;
+}
+
+/**
+ * Check whether an idempotency key was already used by this user.
+ *
+ * - Empty/missing key → `{ duplicate: false }` (caller proceeds normally).
+ * - Key too short or too long → `{ invalid: true }` (caller should 400).
+ * - Key already used → `{ duplicate: true, existingAmount }` (caller replays).
+ * - Key not seen → `{ duplicate: false }` (caller proceeds; key stored in
+ *   `xp_transactions.idempotency_key` by the caller's insert).
+ */
 export async function checkIdempotencyKey(
   userId: number,
   idempotencyKey: string | undefined,
-): Promise<{ duplicate: boolean; existingAmount?: number }> {
+): Promise<IdempotencyCheckResult> {
   if (!idempotencyKey || idempotencyKey.trim().length === 0) {
     return { duplicate: false };
   }
-  // Idempotency keys must look like random strings (prevent accidental collisions).
+  // Idempotency keys must be 8–128 chars of URL-safe characters. Reject
+  // malformed keys explicitly so attackers can't bypass the protection by
+  // sending a 7-char key and relying on silent fallback.
   if (idempotencyKey.length < 8 || idempotencyKey.length > 128) {
-    return { duplicate: false };
+    return { duplicate: false, invalid: true };
+  }
+  if (!/^[a-zA-Z0-9_\-]+$/.test(idempotencyKey)) {
+    return { duplicate: false, invalid: true };
   }
   const existing = await db
     .select({ amount: xpTransactions.amount })

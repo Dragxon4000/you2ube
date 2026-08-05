@@ -30,12 +30,22 @@ export function ActionsPanel({ onAction }: { onAction: () => void }) {
   const [friendUsername, setFriendUsername] = useState("");
 
   useEffect(() => {
-    fetch("/api/videos")
+    const controller = new AbortController();
+    fetch("/api/videos", { signal: controller.signal })
       .then(r => r.json())
       .then(d => {
-        setVideos(d.videos);
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setVideos(d.videos);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") {
+          // Network error — surface a non-fatal "failed to load" state.
+          setLoading(false);
+        }
       });
+    return () => controller.abort();
   }, []);
 
   const handleWatch = async (videoId: number) => {
@@ -131,7 +141,7 @@ export function ActionsPanel({ onAction }: { onAction: () => void }) {
               </div>
               {actionResult.leveledUp && (
                 <div className="mt-1 text-sm">
-                  🎊 Level Up! You're now level {actionResult.newLevel}
+                  🎊 Level Up! You&apos;re now level {actionResult.newLevel}
                 </div>
               )}
               {actionResult.newAchievements && actionResult.newAchievements.length > 0 && (

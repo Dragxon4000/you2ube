@@ -189,9 +189,22 @@ export function getAvatarUrl(user: DiscordUser, size: 16 | 32 | 64 | 128 | 256 =
 // Token auto-refresh helper
 // ============================================================================
 
+// ============================================================================
+// Token auto-refresh helper
+// ============================================================================
+
+// Per-user mutex: if multiple requests for the same user hit getValidAccessToken
+// concurrently and all see an expired token, only ONE of them actually performs
+// the refresh. The others wait on the same promise and reuse the result.
+// Without this, N concurrent requests would burn N refresh tokens and Discord
+// would rate-limit / revoke the grant.
+const tokenRefreshInFlight = new Map<number, Promise<string | null>>();
+
 /**
  * Returns a valid access token for the given user's Discord account,
  * transparently refreshing if expired. Returns null if no Discord link exists.
+ * Concurrent calls for the same user are serialized through an in-flight
+ * promise map so only one refresh happens per expiry event.
  */
 export async function getValidAccessToken(userId: number): Promise<string | null> {
   const row = await db
@@ -207,23 +220,35 @@ export async function getValidAccessToken(userId: number): Promise<string | null
     return row.accessToken;
   }
 
-  try {
-    const refreshed = await refreshAccessToken(row.refreshToken);
-    const expiresAt = new Date(Date.now() + refreshed.expires_in * 1000);
-    await db
-      .update(discordAccounts)
-      .set({
-        accessToken: refreshed.access_token,
-        refreshToken: refreshed.refresh_token,
-        tokenExpiresAt: expiresAt,
-        updatedAt: new Date(),
-      })
-      .where(eq(discordAccounts.userId, userId));
-    return refreshed.access_token;
-  } catch (err) {
-    log("error", "Discord token refresh failed", { userId, error: (err as Error).message });
-    return null;
-  }
+  // Coalesce concurrent refresh attempts for the same user.
+  const inFlight = tokenRefreshInFlight.get(userId);
+  if (inFlight) return inFlight;
+
+  const refreshPromise = (async () => {
+    try {
+      const refreshed = await refreshAccessToken(row.refreshToken);
+      const expiresAt = new Date(Date.now() + refreshed.expires_in * 1000);
+      await db
+        .update(discordAccounts)
+        .set({
+          accessToken: refreshed.access_token,
+          refreshToken: refreshed.refresh_token,
+          tokenExpiresAt: expiresAt,
+          updatedAt: new Date(),
+        })
+        .where(eq(discordAccounts.userId, userId));
+      return refreshed.access_token;
+    } catch (err) {
+      log("error", "Discord token refresh failed", { userId, error: (err as Error).message });
+      return null;
+    } finally {
+      // Always clear the slot so a future expiry can trigger a new refresh.
+      tokenRefreshInFlight.delete(userId);
+    }
+  })();
+
+  tokenRefreshInFlight.set(userId, refreshPromise);
+  return refreshPromise;
 }
 
 // ============================================================================

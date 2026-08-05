@@ -556,3 +556,158 @@ video proxy, unapproved API, or alternate playback provider.
 - [ ] With a configured `YOUTUBE_API_KEY`, manually verify a real search,
   embedded playback, 15-second position save, pause save, page-exit save,
   completion save, and resume seek in a browser.
+
+---
+
+## Entry — Phase 4: Internal Social System
+
+**Date:** 2026-08-05
+
+### Phase completed
+
+Implemented an internal social system with friend requests, accept/reject,
+friend removal, user presence, and a mixed activity feed. This phase keeps
+the existing custom cookie-based authentication as the single identity system
+and does not attempt to mirror Discord friends (Discord does not expose them).
+Supabase is integrated as the optional realtime transport layer; all writes
+continue to go through server-side API routes and are authorized by the
+existing you2ube session cookie.
+
+### Pre-implementation audit
+
+Read and inspected:
+
+- `AUDIT_LOG.md`
+- `src/db/schema.ts`
+- Existing auth, YouTube, watch-session, XP, and profile implementations
+- Existing Supabase Storage helper (`src/lib/supabase/storage.ts`)
+- Existing API routes and protected route proxy
+- Existing documentation and migration files
+
+### Architecture decisions
+
+- **Identity remains unchanged.** This phase adds only social features and
+  social storage; it does not add Supabase Auth or any second auth system.
+- **Server writes are authoritative.** Every friend/request/presence/feed
+  mutation is performed by server API routes using Drizzle and the existing
+  `getSessionUser()` helper.
+- **RLS is applied for defense in depth.** All four new social tables have
+  RLS enabled and `WITH CHECK (false)` policies that deny direct client
+  writes through PostgREST/Realtime. Read-level policies that depend on
+  Supabase Auth `auth.uid()` are not applied in this non-Supabase Postgres
+  sandbox (no `auth` schema exists); they are documented in the migration
+  comments for later when the database is attached to a Supabase project.
+- **Realtime is optional.** The UI polls every 30 seconds and sends
+  heartbeats even when Supabase Realtime is not configured. When a Supabase
+  project URL + anon key are available, the browser client helper in
+  `src/lib/supabase/client.ts` can subscribe to changes.
+- **No Discord integration.** Friend relationships are entirely internal.
+- **Activity feed is denormalized** through append-only `activities` rows.
+
+### Database changes
+
+New tables:
+
+| Table | Purpose |
+|---|---|
+| `friend_requests` | One-way friend requests with `pending`, `accepted`, `rejected`, `cancelled` statuses. |
+| `friendships` | Symmetric friend edges stored as two directed rows with a direction-insensitive unique index over `(LEAST(user_id, friend_id), GREATEST(...))`. |
+| `activities` | Append-only activity log for watch events and friend adds. |
+| `user_presence` | One row per user with online/away/offline status and optional current video. |
+
+Constraints/indexes:
+
+- Unique pending-request index per unordered pair.
+- No-self-request and no-self-friend constraints.
+- Indexes on foreign keys, statuses, and timestamps.
+- RLS enabled on all four tables with blanket write-deny policies for
+  direct PostgREST/Realtime writes.
+- Migration files:
+  - `drizzle/0003_social_system.sql`
+  - `drizzle/0004_social_rls_policies.sql`
+
+### API changes
+
+New authenticated endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/social/friends` | GET | Friends list + incoming/outgoing pending requests. |
+| `/api/social/friends?friendId=...` | DELETE | Removes a friend (deletes both edges). |
+| `/api/social/requests` | POST | Sends a friend request (auto-accepts reciprocal pending). |
+| `/api/social/requests/[id]/accept` | POST | Accepts an incoming request. |
+| `/api/social/requests/[id]/reject` | POST | Rejects an incoming request. |
+| `/api/social/requests/[id]/cancel` | POST | Cancels an outgoing request. |
+| `/api/social/presence` | GET/POST/PATCH | Presence read, online status update, heartbeat. |
+| `/api/social/feed` | GET | Combined friends + own activity feed. |
+| `/api/social/users/search` | GET | Lookup users by email (exact) or display name. |
+
+### UI changes
+
+- Added protected `/social` page with tabs:
+  - **Friends**: add friend by email/display name, friends list with remove,
+    presence dots.
+  - **Requests**: incoming (accept/reject) and outgoing (cancel) with unread
+    badge.
+  - **Feed**: activity cards with relative timestamps.
+  - **Online**: friends currently seen as online/away.
+- Added a "Social" nav link on the dashboard.
+- `/social` is protected by the existing `proxy.ts`.
+
+### Files added/modified
+
+Added:
+
+- `src/lib/social.ts`
+- `src/lib/supabase/client.ts`
+- `src/app/api/social/friends/route.ts`
+- `src/app/api/social/requests/route.ts`
+- `src/app/api/social/requests/[id]/accept/route.ts`
+- `src/app/api/social/requests/[id]/reject/route.ts`
+- `src/app/api/social/requests/[id]/cancel/route.ts`
+- `src/app/api/social/presence/route.ts`
+- `src/app/api/social/feed/route.ts`
+- `src/app/api/social/users/search/route.ts`
+- `src/app/social/page.tsx`
+- `src/components/social-dashboard.tsx`
+- `drizzle/0003_social_system.sql`
+- `drizzle/0004_social_rls_policies.sql`
+
+Modified:
+
+- `src/db/schema.ts` — added social tables and indexes.
+- `src/proxy.ts` — added `/social/:path*` protection.
+- `src/app/dashboard/page.tsx` — added Social nav link.
+- `src/lib/watch-sessions.ts` — writes watch activity rows.
+- `AUDIT_LOG.md` — this entry.
+
+### Security changes
+
+- All social endpoints require authentication.
+- UUID validation on all request/friend/user IDs.
+- Self-friend/self-request rejected.
+- Database-level unique constraints prevent duplicate friendships/pending requests.
+- Reciprocal pending requests auto-accept without duplicating edges.
+- RLS enabled on social tables; direct client writes are denied.
+- Presence status and current-video values are validated.
+- User search by email normalizes via existing validation helpers.
+
+### Known limitations
+
+- RLS read policies tied to Supabase Auth are not applied in this plain-Postgres
+  sandbox (no `auth` schema); server API routes enforce authorization.
+- Supabase Realtime channel subscriptions are available client-side but only
+  activate when `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+  are configured; UI falls back to polling.
+- No pagination on feed or friends list yet.
+- Achievement/level-up activities are defined in the schema but the events are
+  not yet emitted.
+
+### Testing performed
+
+- Applied both SQL migrations against the live Postgres instance.
+- Ran `npx drizzle-kit push --force`.
+- Verified all 13 tables exist including the four new social tables.
+- `npx next typegen` — pass.
+- `npm exec tsc -- --noEmit --pretty false` — pass.
+- `npm run build` — pass; all 26 routes compiled.

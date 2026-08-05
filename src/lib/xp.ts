@@ -1,7 +1,8 @@
 import "server-only";
 import { db } from "@/db";
-import { xpLedger, profiles } from "@/db/schema";
+import { xpLedger } from "@/db/schema";
 import { eq, sum } from "drizzle-orm";
+import { createActivity } from "@/lib/social";
 
 // XP rewards for various actions
 export const XP_REWARDS = {
@@ -23,12 +24,24 @@ export async function awardXp(
   reason: string,
   referenceId?: string,
 ): Promise<void> {
+  const beforeTotal = await getUserTotalXp(userId);
   await db.insert(xpLedger).values({
     userId,
     amount,
     reason,
     referenceId: referenceId ?? null,
   });
+
+  const beforeLevel = calculateLevel(beforeTotal).level;
+  const afterTotal = beforeTotal + amount;
+  const afterLevel = calculateLevel(afterTotal).level;
+  if (afterLevel > beforeLevel) {
+    try {
+      await createActivity(userId, "level_up", { level: afterLevel, totalXp: afterTotal }, "friends");
+    } catch {
+      // XP must not fail because the social feed is temporarily unavailable.
+    }
+  }
 }
 
 /**

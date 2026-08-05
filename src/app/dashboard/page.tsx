@@ -64,6 +64,9 @@ export default async function DashboardPage() {
             </div>
             <span className="text-yellow-400 font-medium">{totalXp} XP</span>
           </div>
+          <Link href="/social" className="hidden text-sm font-medium text-slate-400 hover:text-white sm:inline">
+            Social
+          </Link>
           <Link href={`/users/${user.id}`} className="hidden text-sm font-medium text-slate-400 hover:text-white sm:inline">
             Public profile
           </Link>

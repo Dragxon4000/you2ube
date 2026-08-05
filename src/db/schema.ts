@@ -1,7 +1,9 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   uniqueIndex,
@@ -163,6 +165,7 @@ export const userAchievements = pgTable(
     unlockedAt: timestamp("unlocked_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex("user_achievements_user_achievement_unique").on(table.userId, table.achievementId),
     index("user_achievements_user_id_idx").on(table.userId),
     index("user_achievements_achievement_id_idx").on(table.achievementId),
   ],
@@ -184,3 +187,114 @@ export const searchHistory = pgTable(
     index("search_history_user_id_idx").on(table.userId),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Social system (Phase 4)
+// ---------------------------------------------------------------------------
+
+export const friendRequestStatus = ["pending", "accepted", "rejected", "cancelled"] as const;
+export type FriendRequestStatus = (typeof friendRequestStatus)[number];
+
+// One-sided friend requests. A pending row means from → to is awaiting response.
+// Accepted requests are mirrored into the `friendships` table for fast queries.
+export const friendRequests = pgTable(
+  "friend_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    senderId: uuid("sender_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    receiverId: uuid("receiver_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: text("status", { enum: friendRequestStatus }).notNull().default("pending"),
+    message: text("message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("friend_requests_unique_pending_pair_idx")
+      .on(
+        sql`LEAST(${table.senderId}, ${table.receiverId})`,
+        sql`GREATEST(${table.senderId}, ${table.receiverId})`,
+      )
+      .where(sql`${table.status} = 'pending'`),
+    index("friend_requests_sender_id_idx").on(table.senderId),
+    index("friend_requests_receiver_id_idx").on(table.receiverId),
+    index("friend_requests_status_idx").on(table.status),
+  ],
+);
+
+// Canonical friendship edge. The application always writes the lexicographically
+// smaller UUID to user_a and the larger UUID to user_b, so one row represents
+// the relationship in both directions.
+export const friendships = pgTable(
+  "friendships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userA: uuid("user_a")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    userB: uuid("user_b")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("friendships_user_pair_unique").on(table.userA, table.userB),
+    index("friendships_user_a_idx").on(table.userA),
+    index("friendships_user_b_idx").on(table.userB),
+  ],
+);
+
+// Public activity feed entries (watched, achievement unlocked, level up, etc.)
+export const activityType = [
+  "watch_start",
+  "watch_complete",
+  "level_up",
+  "achievement_unlock",
+  "friend_added",
+] as const;
+
+export const activities = pgTable(
+  "activities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type", { enum: activityType }).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown> | null>(),
+    visibility: text("visibility", { enum: ["public", "friends", "private"] })
+      .notNull()
+      .default("friends"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("activities_user_id_idx").on(table.userId),
+    index("activities_created_at_idx").on(table.createdAt),
+    index("activities_type_idx").on(table.type),
+  ],
+);
+
+// Lightweight user presence — updated periodically by the client.
+export const presenceStatus = ["online", "away", "offline"] as const;
+
+export const presence = pgTable(
+  "presence",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: text("status", { enum: presenceStatus }).notNull().default("offline"),
+    lastSeen: timestamp("last_seen", { withTimezone: true }).notNull().defaultNow(),
+    currentVideoId: text("current_video_id"),
+    currentVideoTitle: text("current_video_title"),
+    customStatus: text("custom_status"),
+  },
+  (table) => [
+    index("presence_status_idx").on(table.status),
+    index("presence_last_seen_idx").on(table.lastSeen),
+  ],
+);
+

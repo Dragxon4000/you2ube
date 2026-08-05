@@ -121,6 +121,38 @@ export function YouTubePlayer({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [hasCompleted, setHasCompleted] = useState(completed);
 
+  const updatePresence = useCallback(
+    async (status: "online" | "offline", watching: boolean) => {
+      const payload = {
+        status,
+        currentVideoId: watching ? video.id : null,
+        currentVideoTitle: watching ? video.title : null,
+      };
+      try {
+        await fetch("/api/social/presence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: status === "offline",
+        });
+      } catch {
+        // Presence is best effort and must never interrupt playback.
+      }
+    },
+    [video.id, video.title],
+  );
+
+  const sendOfflinePresence = useCallback(() => {
+    if (!navigator.sendBeacon) return;
+    navigator.sendBeacon(
+      "/api/social/presence",
+      new Blob(
+        [JSON.stringify({ status: "offline", currentVideoId: null, currentVideoTitle: null })],
+        { type: "application/json" },
+      ),
+    );
+  }, []);
+
   const clearPlaybackInterval = useCallback(() => {
     if (playbackIntervalRef.current !== null) {
       window.clearInterval(playbackIntervalRef.current);
@@ -199,6 +231,7 @@ export function YouTubePlayer({
               if (!isMounted) return;
               playerRef.current = event.target;
               setPlayerReady(true);
+              void updatePresence("online", true);
 
               if (resumePositionSeconds > 3 && !completed) {
                 event.target.seekTo(resumePositionSeconds, true);
@@ -208,6 +241,7 @@ export function YouTubePlayer({
               if (!isMounted) return;
 
               if (event.data === PLAYER_STATE.PLAYING) {
+                void updatePresence("online", true);
                 void persistProgress();
                 clearPlaybackInterval();
                 playbackIntervalRef.current = window.setInterval(() => {
@@ -218,6 +252,7 @@ export function YouTubePlayer({
 
               if (event.data === PLAYER_STATE.PAUSED) {
                 clearPlaybackInterval();
+                void updatePresence("online", true);
                 void persistProgress();
                 return;
               }
@@ -225,6 +260,7 @@ export function YouTubePlayer({
               if (event.data === PLAYER_STATE.ENDED) {
                 clearPlaybackInterval();
                 setHasCompleted(true);
+                void updatePresence("online", false);
                 void persistProgress({ completed: true });
               }
             },
@@ -245,19 +281,29 @@ export function YouTubePlayer({
       isMounted = false;
       clearPlaybackInterval();
       void persistProgress({ beacon: true });
+      sendOfflinePresence();
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [clearPlaybackInterval, completed, persistProgress, resumePositionSeconds, video.id]);
+  }, [
+    clearPlaybackInterval,
+    completed,
+    persistProgress,
+    resumePositionSeconds,
+    sendOfflinePresence,
+    updatePresence,
+    video.id,
+  ]);
 
   useEffect(() => {
     const saveOnPageExit = () => {
       void persistProgress({ beacon: true });
+      sendOfflinePresence();
     };
 
     window.addEventListener("pagehide", saveOnPageExit);
     return () => window.removeEventListener("pagehide", saveOnPageExit);
-  }, [persistProgress]);
+  }, [persistProgress, sendOfflinePresence]);
 
   function handleRestart() {
     const player = playerRef.current;

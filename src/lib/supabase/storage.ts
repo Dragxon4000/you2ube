@@ -1,5 +1,8 @@
 import "server-only";
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  getSupabaseAdminClient,
+  isSupabaseAdminConfigured,
+} from "@/lib/supabase/admin";
 
 const DEFAULT_AVATAR_BUCKET = "avatars";
 
@@ -9,42 +12,12 @@ type UploadAvatarInput = {
   extension: string;
 };
 
-let cachedClient: SupabaseClient | null = null;
-
-function getSupabaseUrl(): string | null {
-  return process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? null;
-}
-
-function getSupabaseServiceRoleKey(): string | null {
-  return process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SERVICE_KEY ?? null;
-}
-
 export function getAvatarBucketName(): string {
   return process.env.SUPABASE_AVATAR_BUCKET ?? DEFAULT_AVATAR_BUCKET;
 }
 
 export function isSupabaseStorageConfigured(): boolean {
-  return Boolean(getSupabaseUrl() && getSupabaseServiceRoleKey());
-}
-
-export function getSupabaseAdminClient(): SupabaseClient {
-  const supabaseUrl = getSupabaseUrl();
-  const serviceRoleKey = getSupabaseServiceRoleKey();
-
-  if (!supabaseUrl || !serviceRoleKey) {
-    throw new Error(
-      "Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
-    );
-  }
-
-  cachedClient ??= createClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
-
-  return cachedClient;
+  return isSupabaseAdminConfigured();
 }
 
 export async function uploadAvatarToStorage({

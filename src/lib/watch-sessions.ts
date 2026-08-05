@@ -3,6 +3,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { watchSessions } from "@/db/schema";
 import { awardXp, XP_REWARDS } from "@/lib/xp";
+import { createActivity } from "@/lib/social";
 
 export const MAX_TRACKED_PLAYBACK_SECONDS = 24 * 60 * 60;
 
@@ -68,6 +69,19 @@ export async function saveWatchProgress(input: WatchProgressInput) {
       if (input.completed) {
         await awardXp(input.userId, XP_REWARDS.watch_complete, "watch_complete", session.id);
       }
+      try {
+        await createActivity(
+          input.userId,
+          input.completed ? "watch_complete" : "watch_start",
+          {
+            videoId: input.videoId,
+            videoTitle: input.videoTitle,
+          },
+          "friends",
+        );
+      } catch {
+        // Activity feed failure should not block playback/session persistence.
+      }
       return { session, created: true, completedNow: input.completed };
     }
 
@@ -103,6 +117,19 @@ export async function saveWatchProgress(input: WatchProgressInput) {
 
   if (completedNow) {
     await awardXp(input.userId, XP_REWARDS.watch_complete, "watch_complete", updated.id);
+    try {
+      await createActivity(
+        input.userId,
+        "watch_complete",
+        {
+          videoId: input.videoId,
+          videoTitle: input.videoTitle,
+        },
+        "friends",
+      );
+    } catch {
+      // Activity feed failure should not block playback/session persistence.
+    }
   }
 
   return { session: updated, created: false, completedNow };

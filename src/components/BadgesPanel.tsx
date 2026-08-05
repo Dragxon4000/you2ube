@@ -26,12 +26,19 @@ export function BadgesPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/badges")
+    const controller = new AbortController();
+    fetch("/api/badges", { signal: controller.signal })
       .then(r => r.json())
       .then(d => {
-        setBadges(d.badges);
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setBadges(d.badges);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") setLoading(false);
       });
+    return () => controller.abort();
   }, []);
 
   if (loading) {

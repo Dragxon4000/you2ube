@@ -64,22 +64,11 @@ export interface DiscordRpcClient {
 }
 
 /**
- * Build the origin string for the current page (Discord uses this for
- * validation during the RPC handshake).
- */
-function getOrigin(): string {
-  if (typeof window === "undefined") return "";
-  return window.location.origin;
-}
-
-/**
  * Attempt to connect to Discord's local RPC server. Returns a client that
  * can be used to set activity, or null if Discord desktop isn't reachable.
  */
 export async function connectDiscordRpc(clientId: string): Promise<DiscordRpcClient | null> {
   if (typeof window === "undefined") return null;
-
-  const origin = getOrigin();
 
   // Try each RPC port until one responds.
   let rpcPort: number | null = null;
@@ -118,7 +107,7 @@ export async function connectDiscordRpc(clientId: string): Promise<DiscordRpcCli
     get status() { return stateRef.value; },
 
     async setActivity(params) {
-      if (status !== "ready") return false;
+      if (stateRef.value !== "ready") return false;
       const frame = await send({
         cmd: "SET_ACTIVITY",
         args: {
@@ -141,12 +130,15 @@ export async function connectDiscordRpc(clientId: string): Promise<DiscordRpcCli
     },
 
     async clearActivity() {
-      if (status !== "ready") return false;
+      if (stateRef.value !== "ready") return false;
       const frame = await send({ cmd: "SET_ACTIVITY", args: { pid: 0, activity: null } });
       return !!frame;
     },
 
     close() {
+      // Resolve any pending RPC promises so they don't leak until timeout.
+      for (const cb of pending.values()) cb(null as unknown as RpcFrame);
+      pending.clear();
       try { ws.close(); } catch { /* noop */ }
       stateRef.value = "idle";
     },
@@ -179,6 +171,9 @@ export async function connectDiscordRpc(clientId: string): Promise<DiscordRpcCli
 
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {
+      // Resolve pending RPC promises before closing so they don't leak.
+      for (const cb of pending.values()) cb(null as unknown as RpcFrame);
+      pending.clear();
       try { ws.close(); } catch { /* noop */ }
       stateRef.value = "error";
       resolve();
@@ -226,11 +221,15 @@ export async function connectDiscordRpc(clientId: string): Promise<DiscordRpcCli
 
     ws.onerror = () => {
       clearTimeout(timeout);
+      for (const cb of pending.values()) cb(null as unknown as RpcFrame);
+      pending.clear();
       stateRef.value = "error";
       resolve();
     };
 
     ws.onclose = () => {
+      for (const cb of pending.values()) cb(null as unknown as RpcFrame);
+      pending.clear();
       stateRef.value = "idle";
     };
   });

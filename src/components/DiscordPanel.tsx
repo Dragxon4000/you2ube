@@ -43,10 +43,18 @@ export function DiscordPanel({
   const rpcRef = useRef<DiscordRpcClient | null>(null);
 
   useEffect(() => {
-    fetch("/api/auth/discord/config")
+    const controller = new AbortController();
+    fetch("/api/auth/discord/config", { signal: controller.signal })
       .then(r => r.json())
-      .then(setConfig)
-      .catch(() => setConfig({ configured: false, webhooksEnabled: false, rpcClientId: null }));
+      .then((cfg) => {
+        if (!controller.signal.aborted) setConfig(cfg);
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") {
+          setConfig({ configured: false, webhooksEnabled: false, rpcClientId: null });
+        }
+      });
+    return () => controller.abort();
   }, []);
 
   // Rich Presence — connect when enabled + linked.

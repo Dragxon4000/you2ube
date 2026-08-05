@@ -11,7 +11,7 @@
  * The web build stays fully functional — `isDesktop()` simply returns false.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 export interface ElectronAPI {
   isDesktop: true;
@@ -85,13 +85,23 @@ export async function showNotification(payload: {
  * React hook: subscribe to main-process navigation events (from the
  * application menu and system tray). Calls `onChange(tab)` whenever the
  * user triggers a "go to tab" action outside the renderer.
+ *
+ * Uses a ref for the callback so that inline arrow functions in callers
+ * don't cause the effect to re-subscribe on every render.
  */
 export function useDesktopNavigation(onChange: (tab: string) => void) {
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+
   useEffect(() => {
     const api = getDesktopAPI();
     if (!api) return;
-    return api.onNavigate((payload) => onChange(payload.tab));
-  }, [onChange]);
+    return api.onNavigate((payload) => onChangeRef.current(payload.tab));
+    // Empty deps: subscribe once on mount, unsubscribe on unmount. The ref
+    // ensures we always call the latest onChange without resubscribing.
+  }, []);
 }
 
 /**

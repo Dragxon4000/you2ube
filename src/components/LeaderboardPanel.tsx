@@ -20,13 +20,20 @@ export function LeaderboardPanel() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/leaderboard")
+    const controller = new AbortController();
+    fetch("/api/leaderboard", { signal: controller.signal })
       .then(r => r.json())
       .then(d => {
-        setEntries(d.leaderboard);
-        setYourUserId(d.yourUserId);
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setEntries(d.leaderboard);
+          setYourUserId(d.yourUserId);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") setLoading(false);
       });
+    return () => controller.abort();
   }, []);
 
   if (loading) {

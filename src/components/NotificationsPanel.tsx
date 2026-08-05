@@ -28,16 +28,28 @@ export function NotificationsPanel() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = () => {
-    fetch("/api/notifications")
+  const load = (signal?: AbortSignal) => {
+    return fetch("/api/notifications", signal ? { signal } : {})
       .then(r => r.json())
       .then(d => {
-        setNotifications(d.notifications);
-        setLoading(false);
+        if (!signal?.aborted) {
+          setNotifications(d.notifications);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError" && !signal?.aborted) {
+          // Surface a non-fatal "failed to load" state instead of hanging forever.
+          setLoading(false);
+        }
       });
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   const handleMarkAll = async () => {
     await fetch("/api/notifications", {
@@ -77,7 +89,7 @@ export function NotificationsPanel() {
         <div>
           <h2 className="text-3xl font-bold">🔔 Notifications</h2>
           <p className="mt-2 text-white/90">
-            {unread === 0 ? "You're all caught up!" : `${unread} unread notification${unread === 1 ? "" : "s"}`}
+            {unread === 0 ? "You&apos;re all caught up!" : `${unread} unread notification${unread === 1 ? "" : "s"}`}
           </p>
         </div>
         {unread > 0 && (

@@ -21,17 +21,26 @@ export function RewardsPanel({ onClaim }: { onClaim: () => void }) {
   const [loading, setLoading] = useState(true);
   const [claiming, setClaiming] = useState<number | null>(null);
 
-  const load = () => {
-    fetch("/api/rewards")
+  const load = (signal?: AbortSignal) => {
+    return fetch("/api/rewards", signal ? { signal } : {})
       .then(r => r.json())
       .then(d => {
-        setRewards(d.rewards);
-        setUserLevel(d.userLevel);
-        setLoading(false);
+        if (!signal?.aborted) {
+          setRewards(d.rewards);
+          setUserLevel(d.userLevel);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError" && !signal?.aborted) setLoading(false);
       });
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   const handleClaim = async (id: number) => {
     setClaiming(id);

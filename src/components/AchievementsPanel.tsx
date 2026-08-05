@@ -47,13 +47,23 @@ export function AchievementsPanel() {
   const [filter, setFilter] = useState<string>("all");
 
   useEffect(() => {
-    fetch("/api/achievements")
+    const controller = new AbortController();
+    fetch("/api/achievements", { signal: controller.signal })
       .then(r => r.json())
       .then(d => {
-        setAchievements(d.achievements);
-        setStats(d.userStats);
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setAchievements(d.achievements);
+          setStats(d.userStats);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") {
+          // Surface a non-fatal "failed to load" state instead of hanging forever.
+          setLoading(false);
+        }
       });
+    return () => controller.abort();
   }, []);
 
   if (loading || !stats) {

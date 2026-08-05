@@ -156,7 +156,11 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
     const isUnlocked = current >= ach.requirementValue;
 
     // Preserve the original unlockedAt — never overwrite an existing timestamp.
-    const preservedUnlockedAt = wasUnlocked ? prev!.unlockedAt : (isUnlocked ? new Date() : null);
+    // Defensive fallback: if prev exists but unlockedAt is null (data inconsistency),
+    // treat it as if the achievement is being unlocked now rather than writing null.
+    const preservedUnlockedAt = wasUnlocked
+      ? (prev!.unlockedAt ?? new Date())
+      : (isUnlocked ? new Date() : null);
 
     await tx
       .insert(userAchievements)
@@ -195,7 +199,11 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
         tier: ach.tier,
       }).catch(err => log("warn", "Discord achievement notify failed", { error: (err as Error).message }));
 
-      // Grant bonus XP (does not re-trigger achievement evaluation — avoids recursion).
+      // Grant bonus XP. We mutate `stats.xp` in place so that subsequent
+      // achievements in THIS same loop iteration see the updated XP total
+      // (e.g., if unlocking achievement A grants 100 XP and that pushes the
+      // user over the threshold for achievement B, B should unlock too).
+      // This is safe because `stats` is a mutable object owned by this call.
       if (ach.xpReward > 0) {
         await tx.insert(xpTransactions).values({
           userId,
@@ -208,6 +216,13 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
           xp: sql`${users.xp} + ${ach.xpReward}`,
           updatedAt: new Date(),
         }).where(eq(users.id, userId));
+        stats.xp += ach.xpReward;
+        // Re-evaluate level too — achievement XP can push the user past a
+        // level threshold, which affects badge qualification.
+        const newLevelInfo = await getLevelForXp(stats.xp, tx);
+        if (newLevelInfo.level > stats.level) {
+          stats.level = newLevelInfo.level;
+        }
       }
     }
   }

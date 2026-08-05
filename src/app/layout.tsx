@@ -3,14 +3,14 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "you2ube",
-  description: "YouTube + social desktop application with XP, achievements, and watch sessions.",
+  title: "you2ube — Phase 6: Progression System",
+  description: "XP, levels, achievements, badges, and rewards for you2ube.",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-slate-950 text-slate-100 antialiased">{children}</body>
+      <body className="bg-slate-100 text-slate-900 antialiased">{children}</body>
     </html>
   );
 }

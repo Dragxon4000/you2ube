@@ -4,6 +4,172 @@ A running record of meaningful changes to the you2ube codebase.
 
 ---
 
+## Phase 8 — Desktop Client
+
+**Date:** 2026
+**Scope:** Convert the web app into a desktop-first experience via Electron, while keeping the web version 100% functional.
+
+### Why Electron (vs Tauri)
+
+| Criterion | Electron | Tauri |
+|---|---|---|
+| Toolchain | Node.js only (already in project) | Requires Rust + Tauri CLI |
+| Bundle size | ~200 MB | ~5–10 MB |
+| Maturity | Very mature, huge ecosystem | Younger, smaller ecosystem |
+| WebView | Bundled Chromium (consistent cross-platform) | System WebView (varies by OS) |
+| Auto-update | `electron-updater` (one line) | `tauri-plugin-updater` |
+
+**Chose Electron** because the project is pure JS, the toolchain is already present, and the Electron ecosystem for auto-update + native notifications is battle-tested. Bundle size is acceptable for a desktop video app.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Electron main process  (electron/main.ts → dist-electron/) │
+│    ├─ Spawns Next.js production server OR connects to dev   │
+│    ├─ Creates BrowserWindow (1280×800, persist bounds)      │
+│    ├─ Builds menu (Cmd+1..7 for tabs)                       │
+│    ├─ Creates system tray with quick actions                │
+│    ├─ Registers global shortcut Cmd+Shift+Y                 │
+│    ├─ Runs autoUpdater (GitHub Releases, 4h polling)        │
+│    └─ Exposes IPC handlers                                  │
+├─────────────────────────────────────────────────────────────┤
+│  Preload  (electron/preload.ts → dist-electron/preload.js)  │
+│    └─ contextBridge → window.electronAPI (typed, narrow)    │
+├─────────────────────────────────────────────────────────────┤
+│  Renderer  (unchanged Next.js app)                          │
+│    ├─ src/lib/desktop.ts — detects electronAPI, exposes:    │
+│    │   • isDesktop() / getDesktopAPI()                      │
+│    │   • showNotification() (native + browser fallback)     │
+│    │   • useDesktopUpdater() — React hook for update state  │
+│    │   • useDesktopNavigation() — React hook for menu nav   │
+│    ├─ src/components/UpdateBanner.tsx — renders only in     │
+│    │   desktop; invisible on web                            │
+│    └─ src/components/ActionsPanel.tsx — fires native OS     │
+│        notifications on XP gains                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Feature Matrix
+
+| Feature | Implementation | Notes |
+|---|---|---|
+| Electron wrapper | `electron/main.ts`, `BrowserWindow` with security lockdown | Single-instance lock, external links open in system browser |
+| Native notifications | Electron `Notification` API via IPC | Falls back to browser `Notification` on web |
+| Auto-update | `electron-updater` → GitHub Releases | Checks at launch + every 4h; download progress streams to UI |
+| Better desktop navigation | Application menu (Cmd+1..7 for tabs), system tray, global shortcut (Cmd+Shift+Y) | React hook `useDesktopNavigation` wires menu → tab |
+| Performance / security | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, preload bridge | Renderer can't reach Node; only narrow typed API exposed |
+| Window state persistence | `electron-store` remembers bounds + maximized state | Restores on next launch |
+| Single instance | `app.requestSingleInstanceLock()` | Second launch focuses existing window |
+| Next.js server mgmt | In prod, main process spawns `next start` on :3001; in dev, connects to running `:3000` | Graceful kill on app quit |
+
+### Desktop-Only UI
+
+- **Update banner** (`src/components/UpdateBanner.tsx`): floating pill in bottom-right with states `available` / `downloading` (with progress bar) / `downloaded` (Restart button) / `error`. Renders **nothing** on the web — zero bundle cost.
+- **Native notification on XP gain** (`ActionsPanel.tsx`): when XP is earned, a native OS notification fires with the XP amount, any level-ups, and any newly-unlocked achievements. Silent no-op on the web (or falls back to browser Notification API if the user has granted permission).
+- **Menu-driven tab navigation**: the `File` menu has entries for every tab with keyboard accelerators. The renderer subscribes via `useDesktopNavigation` and switches tabs on receipt.
+
+### Web Version Preservation
+
+**Every desktop feature is guarded by `isDesktop()` / `window.electronAPI`.** The web version:
+
+- Renders no `UpdateBanner` (the hook returns `status: "idle"`).
+- Uses browser `Notification` API (with permission prompt) when `showNotification` is called, or no-ops.
+- Ignores menu/tray navigation (no IPC listeners).
+- Continues to use the existing `npm run dev` / `npm run build && npm run start` flow unchanged.
+
+### Build Pipeline
+
+| Task | Command |
+|---|---|
+| Run desktop in dev | `./scripts/electron-dev.sh` |
+| Package for distribution | `./scripts/electron-build.sh` (or with `--mac` / `--win` / `--linux`) |
+| Compile Electron TS | `npx tsc -p electron/tsconfig.json` (runs as part of both scripts) |
+| Next.js web build | `npm run build` (unchanged — electron/ is not included) |
+| Next.js web dev | `npm run dev` (unchanged) |
+
+`electron-builder.json` configures:
+- `appId: com.you2ube.desktop`
+- Targets: macOS (dmg + zip, x64 + arm64), Windows (nsis + portable, x64), Linux (AppImage + deb, x64)
+- Publish: GitHub Releases at `Dragxon4000/you2ube` (set `GH_TOKEN` to publish)
+- Files: only `dist-electron/`, `.next/`, `public/`, `package.json`, `node_modules/` — no source maps, no markdown, no `.ts` files ship
+
+### Security Posture
+
+| Concern | Mitigation |
+|---|---|
+| Renderer access to Node | `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` |
+| External link hijacking | `webContents.setWindowOpenHandler` opens external URLs in system browser |
+| Multiple instances racing | `app.requestSingleInstanceLock` + focus existing on second launch |
+| Preload surface area | Only 12 methods exposed via `contextBridge`, all typed |
+| Auto-update trust | `electron-updater` validates GitHub Release signatures; `GH_TOKEN` is server-side only |
+| Window state spoofing | `electron-store` writes to app-data dir; OS-level perms apply |
+
+### Files Added
+
+- `electron/main.ts` — main process (window, menu, tray, updater, IPC, server mgmt, global shortcuts)
+- `electron/preload.ts` — narrow typed bridge to renderer
+- `electron/tsconfig.json` — ESM compilation config
+- `electron-builder.json` — packaging config (mac/win/linux)
+- `dist-electron/main.js` — compiled output (~500 lines)
+- `dist-electron/preload.js` — compiled output (~40 lines)
+- `scripts/electron-dev.sh` — launches Next.js dev + Electron together
+- `scripts/electron-build.sh` — builds Next.js + compiles Electron + runs electron-builder
+- `src/lib/desktop.ts` — renderer-side desktop bridge (detection + hooks)
+- `src/components/UpdateBanner.tsx` — desktop-only update UI
+- `build-resources/README.md` — icon generation guide
+- `docs/DESKTOP.md` — full user/developer documentation
+
+### Files Modified
+
+- `src/components/ActionsPanel.tsx` — fires native notifications on XP gain
+- `src/app/page.tsx` — wires `useDesktopNavigation` + mounts `UpdateBanner`
+- `AUDIT_LOG.md` — this section
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `next typegen` | ✅ |
+| `tsc --noEmit` (renderer) | ✅ |
+| `tsc -p electron/tsconfig.json` | ✅ |
+| `npm run build` | ✅ (web unchanged) |
+| `build_and_start` (web) | ✅ |
+| Electron binary install | ✅ `npx electron --version` runs |
+| Compiled `dist-electron/main.js` | ✅ 18 KB |
+| Compiled `dist-electron/preload.js` | ✅ 1.7 KB |
+| Web version still grants XP | ✅ (+25 XP smoke test) |
+
+### Usage
+
+**For users (after packaging):**
+- macOS: `release/you2ube-<version>-arm64.dmg`
+- Windows: `release/you2ube Setup <version>.exe`
+- Linux: `release/you2ube-<version>.AppImage`
+
+**For developers:**
+```bash
+./scripts/electron-dev.sh        # dev mode (live-reload on Next.js side)
+./scripts/electron-build.sh      # package for current platform
+```
+
+### Remaining Limitations / Future Work
+
+1. **Custom app icon not shipped** — `build-resources/` has a README for generating icons from a PNG, but no PNG is bundled. electron-builder falls back to its default icon until you add `icon.png` / `icon.icns` / `icon.ico`.
+2. **Code signing** — not configured. macOS Gatekeeper + Windows SmartScreen will warn users until you add `CSC_LINK` (macOS) or `WIN_CSC_LINK` (Windows) env vars with your signing certificates.
+3. **Auto-update endpoint** — configured for GitHub Releases at `Dragxon4000/you2ube`; works as soon as you publish a Release with `GH_TOKEN`.
+4. **Rich Presence bridge** — already implemented in Phase 7 for the browser; works identically in Electron (Electron's renderer is Chromium, so the WebSocket RPC connection to Discord desktop works the same way).
+5. **Headless smoke test** — couldn't fully launch Electron in this sandbox (no display libraries); verified compilation + binary presence + all renderer integrations instead. Users will exercise the full flow on their own machines.
+
+### Recommendations for Future Phases
+
+- **Deep-link protocol** — register `you2ube://` scheme so Discord activity buttons can link back into the desktop app.
+- **Global media keys** — hook play/pause/next to Electron's `globalShortcut` for controlling embedded video playback.
+- **Offline caching** — Service Worker + IndexedDB for previously-watched videos.
+- **Window tabs** — instead of one window, open multiple videos in tabs (Electron supports this).
+
+---
+
 ## Phase 7 — Discord Integration
 
 **Date:** 2026

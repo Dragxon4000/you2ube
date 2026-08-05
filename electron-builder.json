@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.you2ube.desktop",
+  "productName": "you2ube",
+  "directories": {
+    "output": "release",
+    "buildResources": "build-resources"
+  },
+  "files": [
+    "dist-electron/**/*",
+    ".next/**/*",
+    "public/**/*",
+    "package.json",
+    "node_modules/**/*",
+    "!node_modules/.cache",
+    "!node_modules/**/*.md",
+    "!node_modules/**/*.ts",
+    "!**/*.map"
+  ],
+  "extraMetadata": {
+    "main": "dist-electron/main.js"
+  },
+  "mac": {
+    "category": "public.app-category.entertainment",
+    "target": [
+      { "target": "dmg", "arch": ["x64", "arm64"] },
+      { "target": "zip", "arch": ["x64", "arm64"] }
+    ],
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "icon": "build-resources/icon.icns"
+  },
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "icon": "build-resources/icon.ico"
+  },
+  "linux": {
+    "target": [
+      { "target": "AppImage", "arch": ["x64"] },
+      { "target": "deb", "arch": ["x64"] }
+    ],
+    "category": "AudioVideo",
+    "icon": "build-resources/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  },
+  "publish": {
+    "provider": "github",
+    "owner": "Dragxon4000",
+    "repo": "you2ube",
+    "releaseType": "release"
+  }
+}

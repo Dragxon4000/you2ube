@@ -10,6 +10,8 @@ import { RewardsPanel } from "@/components/RewardsPanel";
 import { NotificationsPanel } from "@/components/NotificationsPanel";
 import { LeaderboardPanel } from "@/components/LeaderboardPanel";
 import { DiscordPanel } from "@/components/DiscordPanel";
+import { UpdateBanner } from "@/components/UpdateBanner";
+import { useDesktopNavigation } from "@/lib/desktop";
 
 type Tab = "profile" | "achievements" | "badges" | "rewards" | "leaderboard" | "notifications" | "discord";
 
@@ -51,6 +53,14 @@ export default function HomePage() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const triggerRefresh = () => setRefreshKey(k => k + 1);
+
+  // Wire up desktop menu/tray navigation — when the user picks a tab from the
+  // native menu or system tray, switch to it here. No-op on the web.
+  useDesktopNavigation((tab) => {
+    if (["profile", "achievements", "badges", "rewards", "leaderboard", "notifications", "discord"].includes(tab)) {
+      setActiveTab(tab as Tab);
+    }
+  });
 
   const tabs: { id: Tab; label: string; icon: string }[] = [
     { id: "profile", label: "Profile", icon: "👤" },
@@ -110,6 +120,9 @@ export default function HomePage() {
           {activeTab === "discord" && <DiscordTab onLinkChange={triggerRefresh} />}
         </div>
       </div>
+
+      {/* Desktop-only update banner — renders nothing on the web. */}
+      <UpdateBanner />
     </main>
   );
 }

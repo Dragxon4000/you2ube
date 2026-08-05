@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { showNotification } from "@/lib/desktop";
 
 interface Video {
   id: number;
@@ -54,6 +55,18 @@ export function ActionsPanel({ onAction }: { onAction: () => void }) {
         newBadges: data.result?.newBadges,
         message: data.alreadyWatchedToday ? data.message : undefined,
       });
+
+      // Native OS notification for the XP gain (desktop-only, silent no-op on web).
+      if (data.result?.xpGained > 0 && !data.alreadyWatchedToday) {
+        const parts = [`+${data.result.xpGained} XP`];
+        if (data.result.leveledUp) parts.push(`Level ${data.result.newLevel}!`);
+        if (data.result.newAchievements?.length) parts.push(`${data.result.newAchievements.length} achievement${data.result.newAchievements.length === 1 ? "" : "s"}`);
+        void showNotification({
+          title: data.result.leveledUp ? `🎉 Level Up!` : `✨ XP Earned`,
+          body: parts.join(" · "),
+        });
+      }
+
       onAction();
       setTimeout(() => setActionResult(null), 5000);
     }

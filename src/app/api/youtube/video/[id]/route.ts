@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getVideoDetails } from "@/lib/youtube";
+import { getVideoDetails, isYouTubeApiError } from "@/lib/youtube";
 
 export async function GET(
   _request: Request,
@@ -7,14 +7,24 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  if (!id || id.length > 20) {
-    return NextResponse.json({ error: "Invalid video ID." }, { status: 400 });
-  }
+  try {
+    const video = await getVideoDetails(id);
+    if (!video) {
+      return NextResponse.json({ error: "YouTube video not found." }, { status: 404 });
+    }
+    return NextResponse.json({ video });
+  } catch (error) {
+    if (isYouTubeApiError(error)) {
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.status },
+      );
+    }
 
-  const video = await getVideoDetails(id);
-  if (!video) {
-    return NextResponse.json({ error: "Video not found or API unavailable." }, { status: 404 });
+    console.error("[youtube] Unexpected video lookup error:", error);
+    return NextResponse.json(
+      { error: "YouTube metadata is temporarily unavailable." },
+      { status: 502 },
+    );
   }
-
-  return NextResponse.json({ video });
 }

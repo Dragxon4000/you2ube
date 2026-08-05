@@ -180,6 +180,7 @@ export default async function PublicProfilePage({
                   channelName: session.channelName,
                   thumbnailUrl: session.thumbnailUrl,
                   watchedSeconds: session.watchedSeconds,
+                  resumePositionSeconds: session.resumePositionSeconds,
                   durationSeconds: session.durationSeconds,
                   completed: session.completed,
                   lastWatchedAt: session.lastWatchedAt.toISOString(),

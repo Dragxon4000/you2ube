@@ -358,7 +358,7 @@ No existing auth endpoints were removed or replaced.
 - `npx next typegen` — pass.
 - `npm exec tsc -- --noEmit --pretty false` — pass.
 - `npm run build` — pass.
-- Final `build_and_start` validation pending below in the active turn.
+- `build_and_start` — pass, `/api/health` returned `{ ok: true }`.
 
 ---
 
@@ -379,3 +379,180 @@ No existing auth endpoints were removed or replaced.
 - [x] `/api/profile` requires authentication
 - [x] `/api/profile/avatar` requires authentication
 - [x] Public profile pages respect private profile visibility
+
+---
+
+## Entry — Phase 5: Official YouTube Integration, Embedded Playback, and Continue Watching
+
+**Date:** 2026-08-05
+
+### Phase completed
+
+Completed the production YouTube integration extension using the official
+YouTube Data API v3 and YouTube IFrame Player API. This extends the prior
+search/metadata implementation; it does not introduce any video downloader,
+video proxy, unapproved API, or alternate playback provider.
+
+### What already existed
+
+- Server-side `YOUTUBE_API_KEY` integration in `src/lib/youtube.ts`.
+- Official Data API search, trending, and metadata endpoints.
+- `watch_sessions` database table and dashboard history cards.
+- Search cards that previously opened videos externally and recorded an
+  incorrect full-duration watch position on click.
+- Profile system and existing custom session authentication.
+
+### What changed
+
+#### Database changes
+
+- Added `watch_sessions.resume_position_seconds` (integer, default `0`).
+- Added a composite unique index, `watch_sessions_user_video_unique`, over
+  `(user_id, video_id)` to guarantee one durable record per account/video.
+- Created `drizzle/0002_youtube_playback.sql`.
+  - Adds the resume field.
+  - Retains only the newest legacy row for any pre-existing duplicate
+    account/video records before uniqueness is applied.
+  - Creates the composite unique index.
+
+#### API changes
+
+- Reworked `POST /api/watch` to accept validated, actual IFrame Player
+  position updates rather than a click-derived full duration.
+  - Requires authentication.
+  - Validates video IDs, metadata lengths, HTTPS thumbnail URLs, durations,
+    positions, and completion events.
+  - Stores furthest progress separately from exact resume position.
+  - Marks completion only from a player completion event.
+- Enhanced `GET /api/watch` with validated `limit` support.
+- Updated `/api/youtube/search`.
+  - Adds per-user/IP local sliding-window throttling (six searches/minute).
+  - Preserves server-side Data API use and search telemetry.
+  - Returns `429` and `Retry-After` when locally throttled.
+  - Safely maps upstream quota/rate-limit/configuration errors.
+- Updated `/api/youtube/video/[id]` and `/api/youtube/trending` with the
+  same safe upstream error handling.
+
+#### UI changes
+
+- Added protected `/watch/[id]` route.
+  - Displays official Data API metadata.
+  - Uses the official YouTube IFrame Player API inside the application.
+  - Saves progress every 15 seconds, on pause, on end, and on page exit.
+  - Seeks to the stored resume point when opening an unfinished video.
+  - Includes a direct "Open on YouTube" link and clear player loading/error
+    states.
+- Updated search cards to navigate to in-app playback instead of opening a
+  new tab and marking a video completed.
+- Updated history cards to link to `/watch/[id]`, show saved progress, and
+  present explicit "Continue from …" / "Watch again" actions.
+- Renamed dashboard history section to "Continue Watching".
+- Protected `/watch/:path*` through the existing `proxy.ts` auth route
+  protection.
+
+#### New files
+
+- `drizzle/0002_youtube_playback.sql`
+- `src/lib/youtube-rate-limit.ts`
+- `src/lib/watch-sessions.ts`
+- `src/components/youtube-player.tsx`
+- `src/app/watch/[id]/page.tsx`
+
+#### Modified files
+
+- `src/db/schema.ts`
+- `src/lib/youtube.ts`
+- `src/app/api/watch/route.ts`
+- `src/app/api/youtube/search/route.ts`
+- `src/app/api/youtube/trending/route.ts`
+- `src/app/api/youtube/video/[id]/route.ts`
+- `src/components/search-bar.tsx`
+- `src/components/watch-history.tsx`
+- `src/app/dashboard/page.tsx`
+- `src/app/users/[id]/page.tsx`
+- `src/proxy.ts`
+- `README.md`
+- `AUDIT_LOG.md`
+
+### API/quota controls
+
+- The wrapper caches `search.list` results for five minutes.
+- Search results call a single batched `videos.list` request for metadata.
+- Individual metadata and trending calls cache for ten minutes.
+- No automatic pagination/background polling is implemented.
+- Search has a server-side best-effort per-user/IP sliding-window limit.
+- Quota/rate-limit errors are returned as clear user-safe response payloads.
+- Official Google documentation reviewed: default allocation currently notes
+  100 `search.list` calls/day and 10,000 units/day for other endpoints;
+  additional quota requires the official compliance audit process.
+
+### Security and policy controls
+
+- `YOUTUBE_API_KEY` remains server-side only.
+- No video URL is downloaded, proxied, stored, or transformed.
+- Playback uses the official `www.youtube.com/iframe_api` and official
+  embedded player only, with a configured browser origin.
+- The embedded player is shown with native YouTube controls and always has a
+  direct YouTube watch-page link.
+- Watch history updates require the current authenticated session.
+- Payload validation limits data size and prevents invalid video IDs/URLs.
+
+### Known limitations
+
+- The local in-memory search limiter is process-local. Replace it with Redis
+  or another shared limiter before running multiple application instances.
+- An active `YOUTUBE_API_KEY` is required for live search and server-rendered
+  metadata. The app provides a graceful unavailable state when absent.
+- The platform cannot prove continuous human viewing; position persistence is
+  based on official player state/current-time events.
+- Existing historical records created by the old click flow may already have
+  an overstated `watched_seconds`; new records use actual player telemetry.
+
+### Future recommendations
+
+- Add a shared distributed rate limiter and Google Cloud quota monitoring
+  alerts before scaling traffic.
+- Complete the official YouTube API compliance audit before requesting quota
+  expansion.
+- Add cursor pagination only after a quota-budget review.
+- Add user-facing retry timing/countdown for 429 responses.
+- Consider a migration that reconciles legacy click-derived watch data if
+  exact historical accuracy is required.
+
+### Testing performed
+
+- Repository, branch `main`, documentation, migrations, schema, API routes,
+  auth implementation, and current components audited before changes.
+- Official YouTube IFrame Player API and Data API quota documentation read.
+- `psql -f drizzle/0002_youtube_playback.sql` — pass; no legacy duplicate
+  sessions existed in the local database.
+- `npx drizzle-kit push --force` — pass.
+- `npx next typegen` — pass.
+- `npm exec tsc -- --noEmit --pretty false` — pass.
+- `npm run build` — pass; includes `/watch/[id]` and all API routes.
+- `build_and_start` — pass; production health check passed.
+- `GET /api/health` — returned `{ ok: true }`.
+- Anonymous `GET /api/watch` — correctly returned `401`.
+- Anonymous `/watch/dQw4w9WgXcQ` — correctly redirected to login with a safe
+  `next` parameter.
+- Authenticated runtime test — created a temporary account, submitted 12s and
+  then 42s playback positions for one valid YouTube ID, and confirmed one
+  shared `sessionId`, `created: true` then `created: false`, and persisted
+  `watchedSeconds: 42` / `resumePositionSeconds: 42`; test user was deleted.
+- `\d watch_sessions` — confirmed `resume_position_seconds` and the unique
+  `(user_id, video_id)` index in PostgreSQL.
+- Missing `YOUTUBE_API_KEY` fallback — correctly returned a clear `503`
+  `not_configured` payload without exposing any secret.
+
+### Manual testing checklist
+
+- [x] Unauthenticated watch API access is rejected.
+- [x] Unauthenticated `/watch/[id]` access redirects to login.
+- [x] Authenticated first playback progress creates one watch session.
+- [x] Later progress for the same video updates that same session.
+- [x] Persisted resume position is returned by `GET /api/watch`.
+- [x] Database has a unique user/video watch-session constraint.
+- [x] App remains buildable and starts with the production health check.
+- [ ] With a configured `YOUTUBE_API_KEY`, manually verify a real search,
+  embedded playback, 15-second position save, pause save, page-exit save,
+  completion save, and resume seek in a browser.

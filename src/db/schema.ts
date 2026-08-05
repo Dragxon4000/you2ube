@@ -4,6 +4,7 @@ import {
   integer,
   pgTable,
   text,
+  uniqueIndex,
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -123,12 +124,14 @@ export const watchSessions = pgTable(
     channelName: text("channel_name"),
     thumbnailUrl: text("thumbnail_url"),
     durationSeconds: integer("duration_seconds"), // total video duration
-    watchedSeconds: integer("watched_seconds").notNull().default(0),
+    watchedSeconds: integer("watched_seconds").notNull().default(0), // furthest observed playback time
+    resumePositionSeconds: integer("resume_position_seconds").notNull().default(0),
     completed: boolean("completed").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     lastWatchedAt: timestamp("last_watched_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex("watch_sessions_user_video_unique").on(table.userId, table.videoId),
     index("watch_sessions_user_id_idx").on(table.userId),
     index("watch_sessions_video_id_idx").on(table.videoId),
   ],

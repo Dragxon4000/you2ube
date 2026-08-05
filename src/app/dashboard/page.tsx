@@ -130,9 +130,9 @@ export default async function DashboardPage() {
           <SearchBar />
         </section>
 
-        {/* Watch History */}
+        {/* Watch History / Continue Watching */}
         <section>
-          <h2 className="text-lg font-semibold text-white mb-4">📺 Recent Watch History</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">📺 Continue Watching</h2>
           {recentWatches.length === 0 ? (
             <div className="rounded-2xl bg-slate-900 border border-slate-800 p-8 text-center">
               <p className="text-slate-400">No watch history yet.</p>
@@ -148,6 +148,7 @@ export default async function DashboardPage() {
               channelName: s.channelName,
               thumbnailUrl: s.thumbnailUrl,
               watchedSeconds: s.watchedSeconds,
+              resumePositionSeconds: s.resumePositionSeconds,
               durationSeconds: s.durationSeconds,
               completed: s.completed,
               lastWatchedAt: s.lastWatchedAt.toISOString(),

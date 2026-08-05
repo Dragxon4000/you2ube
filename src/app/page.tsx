@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { } from "react";
 import { ProfileCard } from "@/components/ProfileCard";
 import { ActionsPanel } from "@/components/ActionsPanel";
 import { BadgesPanel } from "@/components/BadgesPanel";
@@ -8,8 +9,42 @@ import { AchievementsPanel } from "@/components/AchievementsPanel";
 import { RewardsPanel } from "@/components/RewardsPanel";
 import { NotificationsPanel } from "@/components/NotificationsPanel";
 import { LeaderboardPanel } from "@/components/LeaderboardPanel";
+import { DiscordPanel } from "@/components/DiscordPanel";
 
-type Tab = "profile" | "achievements" | "badges" | "rewards" | "leaderboard" | "notifications";
+type Tab = "profile" | "achievements" | "badges" | "rewards" | "leaderboard" | "notifications" | "discord";
+
+function DiscordTab({ onLinkChange }: { onLinkChange: () => void }) {
+  const [discord, setDiscord] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    fetch("/api/profile")
+      .then(r => r.json())
+      .then(d => {
+        setDiscord(d.discord);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const handleLinkChange = () => {
+    load();
+    onLinkChange();
+  };
+
+  if (loading || !discord) {
+    return (
+      <div className="rounded-3xl bg-white p-8 shadow-lg">
+        <div className="animate-pulse h-48 rounded-2xl bg-slate-100"></div>
+      </div>
+    );
+  }
+
+  return <DiscordPanel discord={discord} onLinkChange={handleLinkChange} />;
+}
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<Tab>("profile");
@@ -24,6 +59,7 @@ export default function HomePage() {
     { id: "rewards", label: "Rewards", icon: "🎁" },
     { id: "leaderboard", label: "Leaderboard", icon: "📊" },
     { id: "notifications", label: "Notifications", icon: "🔔" },
+    { id: "discord", label: "Discord", icon: "🎮" },
   ];
 
   return (
@@ -71,6 +107,7 @@ export default function HomePage() {
           {activeTab === "rewards" && <RewardsPanel key={`rewards-${refreshKey}`} onClaim={triggerRefresh} />}
           {activeTab === "leaderboard" && <LeaderboardPanel key={`lb-${refreshKey}`} />}
           {activeTab === "notifications" && <NotificationsPanel key={`notif-${refreshKey}`} />}
+          {activeTab === "discord" && <DiscordTab onLinkChange={triggerRefresh} />}
         </div>
       </div>
     </main>

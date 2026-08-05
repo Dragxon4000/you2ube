@@ -316,6 +316,44 @@ export const notifications = pgTable(
   }),
 );
 
+// ============================================================================
+// Discord accounts — separate from `users` for three reasons:
+//   1. OAuth tokens are sensitive; keep them out of the primary users row.
+//   2. Unlinking is a clean DELETE instead of NULLing a dozen columns.
+//   3. Extensible to other OAuth providers (Google, GitHub) as their own tables.
+//
+// Each `users.id` maps to AT MOST one `discord_accounts` row (unique FK).
+// Each `discord_id` maps to AT MOST one user (unique constraint).
+// ============================================================================
+export const discordAccounts = pgTable(
+  "discord_accounts",
+  {
+    id: serial("id").primaryKey(),
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    discordId: text("discord_id").notNull(),
+    discordUsername: text("discord_username").notNull(),
+    discordDiscriminator: text("discord_discriminator").notNull().default("0"),
+    discordGlobalName: text("discord_global_name"),
+    discordAvatar: text("discord_avatar"),
+    accessToken: text("access_token").notNull(),
+    refreshToken: text("refresh_token").notNull(),
+    tokenExpiresAt: timestamp("token_expires_at").notNull(),
+    scopes: text("scopes").notNull().default("identify"),
+    notifyLevelUps: boolean("notify_level_ups").notNull().default(true),
+    notifyAchievements: boolean("notify_achievements").notNull().default(true),
+    notifyBadges: boolean("notify_badges").notNull().default(false),
+    richPresenceEnabled: boolean("rich_presence_enabled").notNull().default(false),
+    linkedAt: timestamp("linked_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    userUniqueIdx: uniqueIndex("discord_accounts_user_unique_idx").on(t.userId),
+    discordIdUniqueIdx: uniqueIndex("discord_accounts_discord_id_unique_idx").on(t.discordId),
+  }),
+);
+
 // --- XP rules (database-driven config for how much XP each action grants) ---
 export const xpRules = pgTable(
   "xp_rules",

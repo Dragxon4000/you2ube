@@ -55,6 +55,12 @@ interface ProfileData {
     createdAt: string;
   }>;
   unreadNotifications: number;
+  discord: {
+    linked: boolean;
+    username?: string;
+    globalName?: string | null;
+    avatarUrl?: string;
+  };
 }
 
 export function ProfileCard() {
@@ -83,25 +89,39 @@ export function ProfileCard() {
     );
   }
 
-  const { user, level, progress, ownedBadges, achievements } = data;
+  const { user, level, progress, ownedBadges, achievements, discord } = data;
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       {/* Main Profile Card */}
       <div className="rounded-3xl bg-white p-8 shadow-lg lg:col-span-2">
         <div className="flex items-start gap-6">
-          {/* Avatar */}
-          <div
-            className="flex h-24 w-24 items-center justify-center rounded-full text-5xl shadow-lg"
-            style={{ backgroundColor: level.colorHex + "20", border: `4px solid ${level.colorHex}` }}
-          >
-            {user.avatarEmoji}
-          </div>
+          {/* Avatar — Discord image when linked, else emoji */}
+          {discord.linked && discord.avatarUrl ? (
+            <img
+              src={discord.avatarUrl}
+              alt={discord.globalName ?? discord.username}
+              className="h-24 w-24 rounded-full object-cover shadow-lg ring-4"
+              style={{ borderColor: level.colorHex, boxShadow: `0 0 0 4px ${level.colorHex}30` }}
+            />
+          ) : (
+            <div
+              className="flex h-24 w-24 items-center justify-center rounded-full text-5xl shadow-lg"
+              style={{ backgroundColor: level.colorHex + "20", border: `4px solid ${level.colorHex}` }}
+            >
+              {user.avatarEmoji}
+            </div>
+          )}
 
           {/* User Info */}
           <div className="flex-1">
             <h2 className="text-2xl font-bold text-slate-900">{user.displayName}</h2>
             <p className="text-sm text-slate-500">@{user.username}</p>
+            {discord.linked && (
+              <p className="text-xs text-indigo-600">
+                🎮 {discord.globalName ?? discord.username}
+              </p>
+            )}
             <p className="mt-2 text-slate-700">{user.bio}</p>
 
             {/* Level Badge */}

@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { videos } from "@/db/schema";
+import { videos, discordAccounts } from "@/db/schema";
 import { eq, sql, and } from "drizzle-orm";
 import { getLevelForXp, getXpProgress } from "@/lib/progression";
 import {
   withAuth, apiError, ErrorCode, log,
 } from "@/lib/api-helpers";
+import { getAvatarUrl } from "@/lib/discord";
 import {
   users, notifications, achievements, userAchievements, userBadges, badges, rewards, userRewards, xpTransactions,
 } from "@/db/schema";
@@ -69,6 +70,32 @@ export async function GET() {
         .where(and(eq(notifications.userId, user.id), eq(notifications.read, false)))
         .then(r => r[0]?.count ?? 0);
 
+      // Discord link (if any). Never returns tokens.
+      const discordRow = await db
+        .select()
+        .from(discordAccounts)
+        .where(eq(discordAccounts.userId, user.id))
+        .then(r => r[0]);
+      const discord = discordRow ? {
+        linked: true,
+        discordId: discordRow.discordId,
+        username: discordRow.discordUsername,
+        discriminator: discordRow.discordDiscriminator,
+        globalName: discordRow.discordGlobalName,
+        avatarUrl: getAvatarUrl({
+          id: discordRow.discordId,
+          username: discordRow.discordUsername,
+          discriminator: discordRow.discordDiscriminator,
+          global_name: discordRow.discordGlobalName,
+          avatar: discordRow.discordAvatar,
+        }),
+        linkedAt: discordRow.linkedAt,
+        notifyLevelUps: discordRow.notifyLevelUps,
+        notifyAchievements: discordRow.notifyAchievements,
+        notifyBadges: discordRow.notifyBadges,
+        richPresenceEnabled: discordRow.richPresenceEnabled,
+      } : { linked: false };
+
       return NextResponse.json({
         user: {
           id: user.id,
@@ -90,6 +117,7 @@ export async function GET() {
         achievements: { unlocked: unlockedCount, total: totalAch },
         recentTransactions: recentTx,
         unreadNotifications: unreadNotifs,
+        discord,
       });
     } catch (err) {
       log("error", "profile GET failed", { userId: user.id, error: (err as Error).message });

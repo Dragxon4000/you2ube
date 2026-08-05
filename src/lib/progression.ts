@@ -14,6 +14,7 @@ import {
 } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
 import { log } from "@/lib/api-helpers";
+import { notifyLevelUp, notifyAchievement, notifyBadge } from "@/lib/discord";
 
 export type XpAction = "watch_video" | "host_party" | "invite_friend" | "daily_login";
 
@@ -183,8 +184,16 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
         title: `Achievement Unlocked! ${ach.icon}`,
         message: `${ach.name} — ${ach.description}${ach.xpReward ? ` (+${ach.xpReward} XP bonus)` : ""}`,
         icon: ach.icon,
-        metadata: { achievementCode: ach.code, xpReward: ach.xpReward },
+        metadata: { achievementCode: ach.code, xpReward: ach.xpReward, tier: ach.tier },
       });
+      // Discord bot notification (fire-and-forget).
+      void notifyAchievement({
+        userId,
+        name: ach.name,
+        description: ach.description,
+        icon: ach.icon,
+        tier: ach.tier,
+      }).catch(err => log("warn", "Discord achievement notify failed", { error: (err as Error).message }));
 
       // Grant bonus XP (does not re-trigger achievement evaluation — avoids recursion).
       if (ach.xpReward > 0) {
@@ -242,6 +251,14 @@ async function evaluateBadges(tx: Tx, userId: number, stats: UserStats) {
       icon: b.icon,
       metadata: { badgeCode: b.code, tier: b.tier },
     });
+    // Discord bot notification (fire-and-forget).
+    void notifyBadge({
+      userId,
+      name: b.name,
+      description: b.description,
+      icon: b.icon,
+      tier: b.tier,
+    }).catch(err => log("warn", "Discord badge notify failed", { error: (err as Error).message }));
   }
   return newlyAwarded;
 }
@@ -381,6 +398,12 @@ async function awardXpInTx(tx: Tx, opts: AwardXpOptions): Promise<AwardXpResult>
       icon: "⬆️",
       metadata: { level: newLevel, title: newLevelInfo.title },
     });
+    // Discord bot notification (fire-and-forget — never blocks the transaction).
+    void notifyLevelUp({
+      userId: opts.userId,
+      newLevel,
+      newTitle: newLevelInfo.title,
+    }).catch(err => log("warn", "Discord level-up notify failed", { error: (err as Error).message }));
   }
 
   // 4) XP notification (for non-level-up events).

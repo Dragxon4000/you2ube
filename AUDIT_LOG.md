@@ -4,6 +4,217 @@ A running record of meaningful changes to the you2ube codebase.
 
 ---
 
+## Phase 7 — Discord Integration
+
+**Date:** 2026
+**Scope:** Optional Discord integration using **only official Discord APIs**.
+
+### Strict Scope (Enforced)
+
+| Feature | Status | Official API used |
+|---|---|---|
+| OAuth login | ✅ Implemented | `POST /api/v10/oauth2/token` + `GET /api/v10/users/@me` |
+| User identity | ✅ Implemented | `identify` scope only (id, username, avatar, discriminator, global_name) |
+| Rich Presence | ✅ Implemented | Discord RPC protocol (local WebSocket to Discord desktop) |
+| Bot notifications | ✅ Implemented | Discord Webhooks API (`POST https://discord.com/api/webhooks/...`) |
+| DMs | ❌ Not used | — |
+| Friend lists | ❌ Not used | — |
+| Private messages | ❌ Not used | — |
+| Unofficial APIs | ❌ Not used | — |
+
+**Discord is fully optional.** When env vars are missing:
+- `/api/auth/discord/config` returns `{configured: false}`
+- The Discord tab shows a clean "not configured" message
+- OAuth routes return 503
+- The progression system works identically with or without Discord linked
+
+### Database Schema
+
+**New table: `discord_accounts`** (separate from `users` for three reasons):
+
+1. OAuth tokens are sensitive — kept out of the primary `users` row.
+2. Unlinking is a clean `DELETE`, not NULLing a dozen columns.
+3. Future OAuth providers (Google, GitHub) get their own tables.
+
+```sql
+discord_accounts (
+  id serial PRIMARY KEY,
+  user_id integer NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  discord_id text NOT NULL UNIQUE,
+  discord_username text NOT NULL,
+  discord_discriminator text NOT NULL DEFAULT '0',
+  discord_global_name text,
+  discord_avatar text,
+  access_token text NOT NULL,
+  refresh_token text NOT NULL,
+  token_expires_at timestamp NOT NULL,
+  scopes text NOT NULL DEFAULT 'identify',
+  notify_level_ups boolean NOT NULL DEFAULT true,
+  notify_achievements boolean NOT NULL DEFAULT true,
+  notify_badges boolean NOT NULL DEFAULT false,
+  rich_presence_enabled boolean NOT NULL DEFAULT false,
+  linked_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+)
+```
+
+**Unique constraints:** `(user_id)` (one Discord per user) and `(discord_id)` (one user per Discord account).
+
+Migration generated at `drizzle/0001_phase7_discord_integration.sql`.
+
+### API Routes
+
+| Route | Purpose |
+|---|---|
+| `GET /api/auth/discord/config` | **Public** — returns `{configured, webhooksEnabled, rpcClientId}`. Client uses this to decide whether to render Discord UI. |
+| `GET /api/auth/discord` | Kicks off OAuth — sets `discord_oauth_state` cookie, redirects to Discord authorize URL. |
+| `GET /api/auth/discord/callback` | CSRF state check, code exchange, fetches `/users/@me`, upserts `discord_accounts`. Redirects back to `/?discord=linked` or `/?discord=error&reason=...`. |
+| `POST /api/auth/discord/unlink` | Deletes the user's `discord_accounts` row. |
+| `GET /api/auth/discord/preferences` | Reads current notification + RPC preferences. |
+| `POST /api/auth/discord/preferences` | Updates `notifyLevelUps`, `notifyAchievements`, `notifyBadges`, `richPresenceEnabled` toggles. |
+| `GET /api/profile` | Now returns a `discord` field: `{linked: false}` OR full linked info (identity + avatar URL + preferences). **Tokens are never exposed.** |
+
+### Progression Engine Hooks
+
+`src/lib/progression.ts` now fires Discord webhook notifications (best-effort, fire-and-forget) at three points:
+
+1. **`notifyLevelUp`** — after the `users.level` UPDATE on level-up.
+2. **`notifyAchievement`** — after each newly unlocked achievement.
+3. **`notifyBadge`** — after each newly awarded badge.
+
+All three:
+- Read the user's `discord_accounts` row to check linkage + opt-in preference.
+- Skip silently if not linked or preference disabled.
+- Skip silently if the webhook URL is not configured.
+- Use `void promise.catch(...)` so they never block the progression transaction.
+- Build rich embed payloads with user avatar, tier colors, and timestamps.
+
+### Discord Library (`src/lib/discord.ts`)
+
+Server-side module encapsulating all Discord API calls:
+
+- `getDiscordConfig()` — reads env vars; returns `null` if not configured.
+- `isDiscordConfigured()` / `isDiscordWebhookConfigured()` — fast feature flags.
+- `buildAuthorizeUrl(state)` — official Discord authorize URL with `identify` scope only.
+- `exchangeCodeForTokens(code)` — `POST /oauth2/token` with `grant_type=authorization_code`.
+- `refreshAccessToken(refreshToken)` — `POST /oauth2/token` with `grant_type=refresh_token`.
+- `fetchDiscordUser(accessToken)` — `GET /users/@me`.
+- `getAvatarUrl(user, size)` — official CDN URL builder with default-avatar fallback.
+- `getValidAccessToken(userId)` — transparent refresh if expired.
+- `sendWebhookNotification(payload)` — POSTs embed payloads to the configured webhook.
+- `notifyLevelUp` / `notifyAchievement` / `notifyBadge` — high-level helpers.
+
+### Rich Presence (`src/lib/discord-rpc.ts`)
+
+Client-side module that speaks Discord's **official RPC protocol**:
+
+- Tries ports 6463–6472 (Discord's documented RPC port range) via HTTP probe.
+- Connects via WebSocket to the responding port.
+- Sends HANDSHAKE frame with client ID.
+- On `DISPATCH` / `READY`, requests `AUTHORIZE` with `rpc.activities.write` scope.
+- Once ready, can set/clear activity via `SET_ACTIVITY` commands.
+- **Gracefully fails** when Discord desktop isn't running — the UI shows a clear status message and the rest of the app keeps working.
+
+Exports:
+- `connectDiscordRpc(clientId)` — returns `DiscordRpcClient | null`.
+- `buildWatchingActivity({videoTitle, videoId, startedAt})` — canonical activity payload.
+- `buildHostingActivity({partyTitle, attendeeCount, startedAt})` — canonical activity payload.
+
+### UI
+
+**New tab: Discord** (only visible to the user, hidden when unconfigured via the config endpoint).
+
+- **Not configured state**: Shows a message explaining the env vars needed.
+- **Not linked state**: Gradient hero card with "Connect with Discord →" button linking to `/api/auth/discord`.
+- **Linked state**: Discord avatar + name card, notification preference toggles (level-ups, achievements, badges), Rich Presence toggle with live RPC connection status.
+
+**Profile card update**: When Discord is linked, the profile avatar switches from the emoji fallback to the actual Discord avatar image, and the Discord handle is displayed under the you2ube username.
+
+### Security
+
+- **OAuth state cookie** (`discord_oauth_state`, httpOnly, sameSite=lax, secure in prod, 10min max-age) — prevents CSRF on the callback.
+- **Scope locked to `identify`** — `email`, `guilds`, `guilds.members.read`, `relationships`, `dm_channels.read` are never requested.
+- **OAuth callback validates state** before exchanging the code.
+- **Conflict detection** — linking a Discord account already linked to another you2ube user returns `?discord=error&reason=already_linked` rather than hijacking.
+- **Tokens never exposed** — `GET /api/profile` returns identity fields only.
+- **Preferences scoped to the current user** — the preferences route requires auth and only writes to the current user's row.
+- **Webhook URL is server-side only** — never sent to the browser.
+- **RPC client ID is public** — it's the same as the OAuth client ID and is safe to expose.
+
+### Environment Variables
+
+| Var | Required | Purpose |
+|---|---|---|
+| `DISCORD_CLIENT_ID` | Yes (for Discord features) | OAuth application client ID |
+| `DISCORD_CLIENT_SECRET` | Yes (for Discord features) | OAuth application client secret |
+| `DISCORD_REDIRECT_URI` | No (defaults to `${NEXT_PUBLIC_APP_URL}/api/auth/discord/callback`) | Callback URL |
+| `DISCORD_WEBHOOK_URL` | No | Webhook URL for bot notifications. Omit to disable notifications. |
+| `DISCORD_RPC_CLIENT_ID` | No (defaults to `DISCORD_CLIENT_ID`) | Client ID for Rich Presence handshake |
+| `NEXT_PUBLIC_APP_URL` | No (defaults to `http://localhost:3000`) | Used to build default redirect URI |
+
+When `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET` are unset, all Discord features gracefully disable themselves.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `next typegen` | ✅ |
+| `tsc --noEmit` | ✅ |
+| `npm run build` | ✅ 16 routes compiled (11 prior + 5 new Discord routes) |
+| `drizzle-kit push` | ✅ `discord_accounts` table with 17 columns created |
+| `drizzle-kit generate` | ✅ `0001_phase7_discord_integration.sql` migration |
+| `build_and_start` | ✅ health OK |
+
+**End-to-end smoke tests (Discord unconfigured):**
+
+| Test | Result |
+|---|---|
+| `/api/auth/discord/config` returns `{configured: false}` | ✅ |
+| `/api/profile` returns `discord: {linked: false}` | ✅ |
+| `GET /api/auth/discord` returns 503 when not configured | ✅ |
+| `POST /api/auth/discord/unlink` returns 404 when not linked | ✅ |
+| `POST /api/auth/discord/preferences` returns 404 when not linked | ✅ |
+| Progression XP still works with no Discord configured | ✅ |
+| DB: `discord_accounts` table with 17 columns exists | ✅ |
+
+### Files Added
+
+- `src/lib/discord.ts` — server-side Discord API client (OAuth + webhook).
+- `src/lib/discord-rpc.ts` — client-side Discord RPC module (Rich Presence).
+- `src/app/api/auth/discord/route.ts` — OAuth start.
+- `src/app/api/auth/discord/callback/route.ts` — OAuth callback.
+- `src/app/api/auth/discord/unlink/route.ts` — unlink.
+- `src/app/api/auth/discord/preferences/route.ts` — GET + POST preferences.
+- `src/app/api/auth/discord/config/route.ts` — public config endpoint.
+- `src/components/DiscordPanel.tsx` — Discord UI tab.
+- `drizzle/0001_phase7_discord_integration.sql` — migration.
+
+### Files Modified
+
+- `src/db/schema.ts` — added `discordAccounts` table.
+- `src/lib/progression.ts` — added `notifyLevelUp` / `notifyAchievement` / `notifyBadge` hooks.
+- `src/app/api/profile/route.ts` — returns `discord` field.
+- `src/components/ProfileCard.tsx` — shows Discord avatar when linked.
+- `src/app/page.tsx` — added Discord tab.
+- `drizzle.config.json` — unchanged (already configured for migrations).
+- `AUDIT_LOG.md` — this section.
+
+### Remaining Limitations (By Design)
+
+1. **Rich Presence requires Discord desktop.** Web apps cannot set Discord activities directly — this is a Discord platform restriction. The client module attempts the connection and gracefully reports "Discord desktop not detected" when it fails.
+2. **Bot notifications use webhooks.** A full bot gateway integration (with slash commands, presence updates, etc.) would be scope creep. Webhooks are official, simple, and sufficient for one-way notifications.
+3. **No email scope.** We deliberately don't request the user's email — the integration is for identity + social features, not contact info.
+4. **No Discord guild / server integration.** The app doesn't try to read guild membership, roles, or server lists.
+5. **No DMs / friends / private messages.** Explicitly out of scope per Phase 7 requirements.
+
+### Recommendations for Future Phases
+
+- **Guild role verification**: If you2ube ever has Discord-gated features, add a `guilds` scope + `GET /users/@me/guilds/{guild.id}/member` check.
+- **Activity party / join buttons**: Rich Presence already supports party size + join URLs; wire these to watch parties so other Discord users can click through to join.
+- **Slash command bot**: If users want to check their you2ube stats from Discord, a full bot (gateway + slash commands) is a natural next step. Would require registering slash commands and running a gateway client.
+
+---
+
 ## Phase 6.5 — Production Hardening & Final Review
 
 **Date:** 2026

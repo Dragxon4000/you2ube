@@ -7,7 +7,6 @@ import {
   xpRules,
   users,
   videos,
-  notifications,
 } from "@/db/schema";
 import { sql } from "drizzle-orm";
 
@@ -143,39 +142,30 @@ async function runSeed() {
     ]).onConflictDoNothing();
   }
 
-  // --- Demo users + demo content (only if none exist) ---
+  // --- Demo leaderboard filler + demo video catalog (only if no users exist) ---
+  // Real users are created dynamically by src/lib/session.ts on first visit.
+  // The filler users below exist purely so the leaderboard isn't empty.
   const existingUsers = await db.select({ count: sql<number>`count(*)::int` }).from(users);
   if ((existingUsers[0]?.count ?? 0) === 0) {
-    const [you] = await db.insert(users).values([
-      { username: "you", displayName: "You", avatarEmoji: "🎬", bio: "Your you2ube journey starts here.", xp: 0, level: 1 },
+    const [demoAuthor] = await db.insert(users).values([
       { username: "alice", displayName: "Alice Binger", avatarEmoji: "🦊", bio: "I watch everything.", xp: 2450, level: 6 },
       { username: "bob", displayName: "Bob Party", avatarEmoji: "🐻", bio: "Watch-party host extraordinaire.", xp: 5200, level: 9 },
       { username: "cara", displayName: "Cara Stream", avatarEmoji: "🐼", bio: "Community builder.", xp: 12800, level: 14 },
     ]).returning();
 
-    // Seed a few demo videos for the "watch video" action
-    if (you) {
+    if (demoAuthor) {
       await db.insert(videos).values([
-        { userId: you.id, title: "How to make the perfect espresso", thumbnailEmoji: "☕", durationSec: 240 },
-        { userId: you.id, title: "Sunset timelapse over the mountains", thumbnailEmoji: "🌄", durationSec: 120 },
-        { userId: you.id, title: "Beginner's guide to watercolor painting", thumbnailEmoji: "🎨", durationSec: 480 },
-        { userId: you.id, title: "Top 10 indie games of the year", thumbnailEmoji: "🎮", durationSec: 360 },
-        { userId: you.id, title: "Lo-fi beats for studying", thumbnailEmoji: "🎧", durationSec: 1800 },
-        { userId: you.id, title: "Street food tour: Tokyo edition", thumbnailEmoji: "🍜", durationSec: 540 },
-        { userId: you.id, title: "Quick 10-minute home workout", thumbnailEmoji: "💪", durationSec: 600 },
-        { userId: you.id, title: "Behind the scenes of a film set", thumbnailEmoji: "🎥", durationSec: 420 },
+        { userId: demoAuthor.id, title: "How to make the perfect espresso", thumbnailEmoji: "☕", durationSec: 240 },
+        { userId: demoAuthor.id, title: "Sunset timelapse over the mountains", thumbnailEmoji: "🌄", durationSec: 120 },
+        { userId: demoAuthor.id, title: "Beginner's guide to watercolor painting", thumbnailEmoji: "🎨", durationSec: 480 },
+        { userId: demoAuthor.id, title: "Top 10 indie games of the year", thumbnailEmoji: "🎮", durationSec: 360 },
+        { userId: demoAuthor.id, title: "Lo-fi beats for studying", thumbnailEmoji: "🎧", durationSec: 1800 },
+        { userId: demoAuthor.id, title: "Street food tour: Tokyo edition", thumbnailEmoji: "🍜", durationSec: 540 },
+        { userId: demoAuthor.id, title: "Quick 10-minute home workout", thumbnailEmoji: "💪", durationSec: 600 },
+        { userId: demoAuthor.id, title: "Behind the scenes of a film set", thumbnailEmoji: "🎥", durationSec: 420 },
       ]);
     }
-
-    // Welcome notification
-    if (you) {
-      await db.insert(notifications).values({
-        userId: you.id,
-        type: "system",
-        title: "Welcome to you2ube! 🎉",
-        message: "Start watching videos, hosting watch parties, and inviting friends to earn XP and level up.",
-        icon: "👋",
-      });
-    }
+    // Welcome notifications for real users are created by src/lib/session.ts
+    // on first visit — not here, so we don't double-send.
   }
 }

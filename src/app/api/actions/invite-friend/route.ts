@@ -1,61 +1,82 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
 import { friendInvites } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { awardXp } from "@/lib/progression";
-import { seedProgressionSystem } from "@/db/seed";
-import { getCurrentUser } from "@/lib/session";
+import { awardXp, runProgressionTx } from "@/lib/progression";
+import {
+  withAuth, parseJsonBody, apiError, ErrorCode,
+  checkIdempotencyKey, checkRateLimit, USERNAME_REGEX, log,
+} from "@/lib/api-helpers";
 
-// Username must be alphanumeric, underscores, hyphens — 2-30 chars.
-const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,30}$/;
+const RATE_LIMIT_PER_MINUTE = 10;
 
 // POST /api/actions/invite-friend
 export async function POST(req: Request) {
-  await seedProgressionSystem();
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  return withAuth(async ({ user }) => {
+    const rl = checkRateLimit(`invite:${user.id}`, RATE_LIMIT_PER_MINUTE);
+    if (!rl.allowed) {
+      return apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
+        resetAt: rl.resetAt,
+      });
+    }
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+    const body = await parseJsonBody<{
+      inviteeUsername?: unknown;
+      idempotencyKey?: unknown;
+    }>(req);
+    if (!body.ok) return body.response;
 
-  const raw = (body as { inviteeUsername?: unknown }).inviteeUsername;
-  if (typeof raw !== "string" || !USERNAME_REGEX.test(raw.trim())) {
-    return NextResponse.json(
-      { error: "inviteeUsername must be 2-30 chars, alphanumeric with _ or -" },
-      { status: 400 },
-    );
-  }
-  const inviteeUsername = raw.trim();
+    const { inviteeUsername, idempotencyKey } = body.data;
+    const raw = typeof inviteeUsername === "string" ? inviteeUsername.trim() : "";
+    if (!USERNAME_REGEX.test(raw)) {
+      return apiError(400, ErrorCode.INVALID_INPUT, "inviteeUsername must be 2-30 chars, alphanumeric with _ or -");
+    }
+    if (raw.toLowerCase() === user.username.toLowerCase()) {
+      return apiError(400, ErrorCode.INVALID_INPUT, "You can't invite yourself");
+    }
 
-  // Prevent inviting yourself
-  if (inviteeUsername.toLowerCase() === user.username.toLowerCase()) {
-    return NextResponse.json({ error: "You can't invite yourself" }, { status: 400 });
-  }
+    const idemKey = typeof idempotencyKey === "string" ? idempotencyKey : undefined;
+    const idemCheck = await checkIdempotencyKey(user.id, idemKey);
+    if (idemCheck.duplicate) {
+      return NextResponse.json({
+        success: true,
+        idempotentReplay: true,
+        message: "This action was already processed.",
+        result: { xpGained: idemCheck.existingAmount ?? 0 },
+      });
+    }
 
-  const [invite] = await db.insert(friendInvites).values({
-    inviterId: user.id,
-    inviteeUsername,
-    xpEarned: 0,
-    accepted: true, // simulate acceptance for demo
-  }).returning();
+    try {
+      const out = await runProgressionTx(async (tx) => {
+        const [invite] = await tx.insert(friendInvites).values({
+          inviterId: user.id,
+          inviteeUsername: raw,
+          xpEarned: 0,
+          accepted: true, // simulate acceptance for demo
+        }).returning();
 
-  const result = await awardXp({
-    userId: user.id,
-    action: "invite_friend",
-    referenceType: "friend_invite",
-    referenceId: invite.id,
-    contextMessage: `Invited ${inviteeUsername} to you2ube — they accepted!`,
-  });
+        const result = await awardXp({
+          userId: user.id,
+          action: "invite_friend",
+          referenceType: "friend_invite",
+          referenceId: invite.id,
+          contextMessage: `Invited ${raw} to you2ube — they accepted!`,
+          idempotencyKey: idemKey,
+          tx,
+        });
 
-  await db.update(friendInvites).set({ xpEarned: result.xpGained }).where(eq(friendInvites.id, invite.id));
+        await tx.update(friendInvites).set({ xpEarned: result.xpGained }).where(eq(friendInvites.id, invite.id));
 
-  return NextResponse.json({
-    success: true,
-    invite: { id: invite.id, inviteeUsername: invite.inviteeUsername },
-    result,
+        return { invite, result };
+      });
+
+      return NextResponse.json({
+        success: true,
+        invite: { id: out.invite.id, inviteeUsername: out.invite.inviteeUsername },
+        result: out.result,
+      });
+    } catch (err) {
+      log("error", "invite-friend action failed", { userId: user.id, error: (err as Error).message });
+      return apiError(500, ErrorCode.INTERNAL, "Failed to record invite");
+    }
   });
 }

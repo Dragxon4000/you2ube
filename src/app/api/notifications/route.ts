@@ -1,60 +1,84 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { notifications } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
-import { seedProgressionSystem } from "@/db/seed";
-import { getCurrentUser } from "@/lib/session";
+import { eq, desc, and } from "drizzle-orm";
+import {
+  withAuth, parseJsonBody, apiError, ErrorCode, isPositiveInt, log,
+} from "@/lib/api-helpers";
 
 // GET /api/notifications
-export async function GET() {
-  await seedProgressionSystem();
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+export async function GET(req: Request) {
+  return withAuth(async ({ user }) => {
+    try {
+      const url = new URL(req.url);
+      const limitRaw = parseInt(url.searchParams.get("limit") ?? "50", 10);
+      const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 50;
+      const cursor = url.searchParams.get("cursor");
+      const cursorDate = cursor ? new Date(cursor) : null;
+      const cursorValid = cursorDate && !Number.isNaN(cursorDate.getTime());
 
-  const all = await db
-    .select()
-    .from(notifications)
-    .where(eq(notifications.userId, user.id))
-    .orderBy(desc(notifications.createdAt))
-    .limit(50);
+      const where = cursorValid
+        ? and(eq(notifications.userId, user.id), desc(notifications.createdAt))
+        : eq(notifications.userId, user.id);
 
-  return NextResponse.json({ notifications: all });
+      const all = await db
+        .select()
+        .from(notifications)
+        .where(eq(notifications.userId, user.id))
+        .orderBy(desc(notifications.createdAt))
+        .limit(limit);
+
+      // Simple cursor: return the last createdAt so the client can paginate.
+      const nextCursor = all.length === limit ? all[all.length - 1].createdAt.toISOString() : null;
+
+      return NextResponse.json({ notifications: all, nextCursor, limit });
+    } catch (err) {
+      log("error", "notifications GET failed", { userId: user.id, error: (err as Error).message });
+      return apiError(500, ErrorCode.INTERNAL, "Failed to load notifications");
+    }
+  });
 }
 
-// POST /api/notifications - mark one or all as read (scoped to current user)
+// POST /api/notifications - mark one or all as read (scoped to current user).
 export async function POST(req: Request) {
-  await seedProgressionSystem();
-  const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  return withAuth(async ({ user }) => {
+    const body = await parseJsonBody<{ id?: unknown; markAll?: unknown }>(req);
+    if (!body.ok) return body.response;
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+    const { id, markAll } = body.data;
 
-  const id = (body as { id?: unknown }).id;
-  const markAll = (body as { markAll?: unknown }).markAll;
+    try {
+      if (markAll === true) {
+        await db.update(notifications).set({ read: true }).where(eq(notifications.userId, user.id));
+        return NextResponse.json({ success: true, marked: "all" });
+      }
 
-  if (markAll === true) {
-    await db.update(notifications).set({ read: true }).where(eq(notifications.userId, user.id));
-  } else if (typeof id === "number" && Number.isInteger(id) && id > 0) {
-    // IDOR-safe: only mark read if the notification belongs to this user.
-    const row = await db
-      .select({ userId: notifications.userId })
-      .from(notifications)
-      .where(eq(notifications.id, id))
-      .then(r => r[0]);
-    if (!row) {
-      return NextResponse.json({ error: "Notification not found" }, { status: 404 });
+      if (isPositiveInt(id, 1_000_000_000)) {
+        // IDOR-safe: only mark read if the notification belongs to this user.
+        // Atomic single update scoped to user — eliminates race between read + update.
+        const result = await db
+          .update(notifications)
+          .set({ read: true })
+          .where(and(eq(notifications.id, id), eq(notifications.userId, user.id)));
+        // Drizzle doesn't expose affected-row counts portably here, so re-check.
+        const row = await db
+          .select({ id: notifications.id })
+          .from(notifications)
+          .where(and(eq(notifications.id, id), eq(notifications.userId, user.id), eq(notifications.read, true)))
+          .then(r => r[0]);
+        if (!row) {
+          // Either it doesn't exist OR it doesn't belong to the user.
+          const exists = await db.select({ id: notifications.id }).from(notifications).where(eq(notifications.id, id)).then(r => r[0]);
+          if (!exists) return apiError(404, ErrorCode.NOT_FOUND, "Notification not found");
+          return apiError(403, ErrorCode.FORBIDDEN, "Notification does not belong to you");
+        }
+        return NextResponse.json({ success: true, marked: id });
+      }
+
+      return apiError(400, ErrorCode.INVALID_INPUT, "Provide id (positive integer) or markAll: true");
+    } catch (err) {
+      log("error", "notifications POST failed", { userId: user.id, error: (err as Error).message });
+      return apiError(500, ErrorCode.INTERNAL, "Failed to mark notifications");
     }
-    if (row.userId !== user.id) {
-      return NextResponse.json({ error: "Notification does not belong to you" }, { status: 403 });
-    }
-    await db.update(notifications).set({ read: true }).where(eq(notifications.id, id));
-  } else {
-    return NextResponse.json({ error: "Provide id (number) or markAll: true" }, { status: 400 });
-  }
-  return NextResponse.json({ success: true });
+  });
 }

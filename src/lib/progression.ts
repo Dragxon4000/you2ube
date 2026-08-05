@@ -13,6 +13,7 @@ import {
   xpRules,
 } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
+import { log } from "@/lib/api-helpers";
 
 export type XpAction = "watch_video" | "host_party" | "invite_friend" | "daily_login";
 
@@ -27,6 +28,15 @@ export interface AwardXpOptions {
   referenceId?: number;
   /** Extra context to include in notifications. */
   contextMessage?: string;
+  /** Idempotency key — prevents double-XP on retry. Optional. */
+  idempotencyKey?: string;
+  /**
+   * Optional transaction to reuse. When provided, `awardXp` will NOT create
+   * its own transaction — the caller is responsible for commit/rollback.
+   * This lets action routes include their side-writes (watch_sessions,
+   * watch_parties updates, etc.) in the SAME atomic unit as the XP grant.
+   */
+  tx?: Tx;
 }
 
 export interface AwardXpResult {
@@ -38,16 +48,23 @@ export interface AwardXpResult {
   newAchievements: Array<{ id: number; name: string; icon: string; xpReward: number }>;
   newBadges: Array<{ id: number; name: string; icon: string; tier: string }>;
   newRewards: Array<{ id: number; name: string; icon: string }>;
+  /** True when an idempotency-key collision was detected (no new work was done). */
+  idempotentReplay?: boolean;
 }
 
-// Type for transaction client (subset of db we use inside tx)
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// Transaction-client type — the callback argument of db.transaction(...)
+export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
  * Get the level that corresponds to a given XP total, reading from the `levels` table.
+ * Accepts an optional tx so callers inside a transaction see their own writes.
  */
-export async function getLevelForXp(xp: number): Promise<{ level: number; title: string; colorHex: string; perk: string }> {
-  const allLevels = await db
+export async function getLevelForXp(
+  xp: number,
+  tx?: Tx,
+): Promise<{ level: number; title: string; colorHex: string; perk: string }> {
+  const reader = tx ?? db;
+  const allLevels = await reader
     .select()
     .from(levels)
     .orderBy(sql`${levels.level} asc`);
@@ -127,7 +144,6 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
     .select()
     .from(userAchievements)
     .where(eq(userAchievements.userId, userId));
-  const unlockedIds = new Set(userAch.filter(u => u.unlocked).map(u => u.achievementId));
   const progressById = new Map(userAch.map(u => [u.achievementId, u]));
 
   const newlyUnlocked: Array<{ id: number; name: string; icon: string; xpReward: number }> = [];
@@ -138,7 +154,7 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
     const wasUnlocked = prev?.unlocked ?? false;
     const isUnlocked = current >= ach.requirementValue;
 
-    // Upsert progress — preserve original unlockedAt if already unlocked.
+    // Preserve the original unlockedAt — never overwrite an existing timestamp.
     const preservedUnlockedAt = wasUnlocked ? prev!.unlockedAt : (isUnlocked ? new Date() : null);
 
     await tx
@@ -179,7 +195,10 @@ async function evaluateAchievements(tx: Tx, userId: number, stats: UserStats) {
           referenceType: "achievement",
           referenceId: ach.id,
         });
-        await tx.update(users).set({ xp: sql`${users.xp} + ${ach.xpReward}` }).where(eq(users.id, userId));
+        await tx.update(users).set({
+          xp: sql`${users.xp} + ${ach.xpReward}`,
+          updatedAt: new Date(),
+        }).where(eq(users.id, userId));
       }
     }
   }
@@ -237,9 +256,9 @@ async function evaluateRewards(tx: Tx, userId: number, level: number) {
   const claimedRows = await tx.select().from(userRewards).where(eq(userRewards.userId, userId));
   const claimedIds = new Set(claimedRows.map(r => r.rewardId));
 
-  // Pull all existing reward notifications for this user (any type) so we can skip duplicates.
+  // Use the (user_id, type) index to quickly find existing reward notifications.
   const existingRewardNotifs = await tx
-    .select({ metadata: notifications.metadata })
+    .select({ metadata: notifications.metadata, type: notifications.type })
     .from(notifications)
     .where(and(
       eq(notifications.userId, userId),
@@ -270,126 +289,189 @@ async function evaluateRewards(tx: Tx, userId: number, level: number) {
 }
 
 /**
- * Core XP-awarding function. Wrapped in a transaction so partial failures
- * (e.g. notification insert fails) don't leave the database in an
- * inconsistent state.
+ * Core XP-awarding logic, extracted so it can run inside either a fresh
+ * transaction (default) or a caller-provided transaction (when action routes
+ * need to co-locate their side-writes with the XP grant atomically).
+ */
+async function awardXpInTx(tx: Tx, opts: AwardXpOptions): Promise<AwardXpResult> {
+  const base = await getBaseXpForAction(opts.action, tx);
+
+  // Lock the user row to serialize concurrent XP grants for the same user.
+  // Combined with atomic `SET xp = xp + N` updates, this prevents races where
+  // two parallel grants both read stale level/counter values.
+  const userRows = await tx.execute(
+    sql`SELECT id, xp, level, total_videos_watched, total_parties_hosted, total_friends_invited
+        FROM users WHERE id = ${opts.userId} FOR UPDATE`,
+  );
+  // node-postgres returns a QueryResult; the rows live on `.rows`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rows = (userRows as any).rows as Array<{
+    id: number; xp: number; level: number;
+    total_videos_watched: number; total_parties_hosted: number; total_friends_invited: number;
+  }>;
+  const userRow = rows[0];
+  if (!userRow) throw new Error(`User ${opts.userId} not found`);
+  const user = {
+    id: userRow.id,
+    xp: userRow.xp,
+    level: userRow.level,
+    totalVideosWatched: userRow.total_videos_watched,
+    totalPartiesHosted: userRow.total_parties_hosted,
+    totalFriendsInvited: userRow.total_friends_invited,
+  };
+
+  if (base === 0) {
+    return {
+      xpGained: 0,
+      newTotalXp: user.xp,
+      previousLevel: user.level,
+      newLevel: user.level,
+      leveledUp: false,
+      newAchievements: [],
+      newBadges: [],
+      newRewards: [],
+    };
+  }
+
+  const levelBonus = opts.bonusMultiplier ?? (await getLevelBonusMultiplier(user.level, tx));
+  const rawXp = Math.round((base + (opts.bonusFlat ?? 0)) * levelBonus);
+  const previousLevel = user.level;
+
+  // 1) Insert XP transaction row (carries idempotency key if provided).
+  await tx.insert(xpTransactions).values({
+    userId: opts.userId,
+    amount: rawXp,
+    reason: opts.action,
+    referenceType: opts.referenceType ?? null,
+    referenceId: opts.referenceId ?? null,
+    idempotencyKey: opts.idempotencyKey ?? null,
+  });
+
+  // 2) Atomic XP + counter increment (single UPDATE with SQL arithmetic — race-safe).
+  const updateSet: {
+    xp: ReturnType<typeof sql>;
+    updatedAt: Date;
+    totalVideosWatched?: ReturnType<typeof sql>;
+    totalPartiesHosted?: ReturnType<typeof sql>;
+    totalFriendsInvited?: ReturnType<typeof sql>;
+  } = {
+    xp: sql`${users.xp} + ${rawXp}`,
+    updatedAt: new Date(),
+  };
+  if (opts.action === "watch_video") updateSet.totalVideosWatched = sql`${users.totalVideosWatched} + 1`;
+  if (opts.action === "host_party") updateSet.totalPartiesHosted = sql`${users.totalPartiesHosted} + 1`;
+  if (opts.action === "invite_friend") updateSet.totalFriendsInvited = sql`${users.totalFriendsInvited} + 1`;
+
+  await tx.update(users).set(updateSet).where(eq(users.id, opts.userId));
+
+  // Re-read the user row so we see the freshly-committed counters.
+  const refreshedUser = await tx.select().from(users).where(eq(users.id, opts.userId)).then(r => r[0]);
+  const newLevelInfo = await getLevelForXp(refreshedUser.xp, tx);
+  const newLevel = newLevelInfo.level;
+  const leveledUp = newLevel > previousLevel;
+
+  // 3) Persist the new level if raised.
+  if (leveledUp) {
+    await tx.update(users).set({ level: newLevel, updatedAt: new Date() }).where(eq(users.id, opts.userId));
+    await tx.insert(notifications).values({
+      userId: opts.userId,
+      type: "level_up",
+      title: `Level Up! 🎉 You're now level ${newLevel}`,
+      message: `You've reached "${newLevelInfo.title}". ${newLevelInfo.perk ? `Perk: ${newLevelInfo.perk}` : ""}`,
+      icon: "⬆️",
+      metadata: { level: newLevel, title: newLevelInfo.title },
+    });
+  }
+
+  // 4) XP notification (for non-level-up events).
+  if (opts.contextMessage && !leveledUp) {
+    await tx.insert(notifications).values({
+      userId: opts.userId,
+      type: "xp",
+      title: `+${rawXp} XP`,
+      message: opts.contextMessage,
+      icon: "✨",
+      metadata: { xp: rawXp, action: opts.action },
+    });
+  }
+
+  // 5) Achievement evaluation (uses post-grant XP + counters).
+  const statsForAch: UserStats = {
+    xp: refreshedUser.xp,
+    level: newLevel,
+    videosWatched: refreshedUser.totalVideosWatched,
+    partiesHosted: refreshedUser.totalPartiesHosted,
+    friendsInvited: refreshedUser.totalFriendsInvited,
+  };
+  const newAchievements = await evaluateAchievements(tx, opts.userId, statsForAch);
+
+  // 6) Re-read XP after achievement bonuses AND recompute level — this is the
+  //    fix for the bug where achievement-granted XP could push the user past
+  //    a level threshold without the `level` column updating.
+  const finalUser = await tx.select().from(users).where(eq(users.id, opts.userId)).then(r => r[0]);
+  const finalLevelInfo = await getLevelForXp(finalUser.xp, tx);
+  if (finalLevelInfo.level > newLevel) {
+    await tx.update(users).set({ level: finalLevelInfo.level, updatedAt: new Date() }).where(eq(users.id, opts.userId));
+    await tx.insert(notifications).values({
+      userId: opts.userId,
+      type: "level_up",
+      title: `Level Up! 🎉 You're now level ${finalLevelInfo.level}`,
+      message: `Achievement XP pushed you to "${finalLevelInfo.title}". ${finalLevelInfo.perk ? `Perk: ${finalLevelInfo.perk}` : ""}`,
+      icon: "⬆️",
+      metadata: { level: finalLevelInfo.level, title: finalLevelInfo.title, source: "achievement_bonus" },
+    });
+  }
+
+  // 7) Badge evaluation.
+  const newBadges = await evaluateBadges(tx, opts.userId, {
+    xp: finalUser.xp,
+    level: finalLevelInfo.level,
+    videosWatched: finalUser.totalVideosWatched,
+    partiesHosted: finalUser.totalPartiesHosted,
+    friendsInvited: finalUser.totalFriendsInvited,
+  });
+
+  // 8) Reward evaluation (spam-safe).
+  const newRewards = await evaluateRewards(tx, opts.userId, finalLevelInfo.level);
+
+  return {
+    xpGained: rawXp,
+    newTotalXp: finalUser.xp,
+    previousLevel,
+    newLevel: finalLevelInfo.level,
+    leveledUp: finalLevelInfo.level > previousLevel,
+    newAchievements,
+    newBadges,
+    newRewards,
+  };
+}
+
+/**
+ * Core XP-awarding function. Accepts an optional `tx` so callers can
+ * co-locate their side-writes (watch_sessions, watch_parties updates, etc.)
+ * in the same atomic unit as the XP grant. If no tx is provided, a fresh
+ * transaction is created internally.
  */
 export async function awardXp(opts: AwardXpOptions): Promise<AwardXpResult> {
-  return db.transaction(async (tx) => {
-    const base = await getBaseXpForAction(opts.action, tx);
+  if (opts.tx) {
+    return awardXpInTx(opts.tx, opts);
+  }
+  return db.transaction(async (tx) => awardXpInTx(tx, opts));
+}
 
-    const user = await tx.select().from(users).where(eq(users.id, opts.userId)).then(r => r[0]);
-    if (!user) throw new Error(`User ${opts.userId} not found`);
-
-    if (base === 0) {
-      return {
-        xpGained: 0,
-        newTotalXp: user.xp,
-        previousLevel: user.level,
-        newLevel: user.level,
-        leveledUp: false,
-        newAchievements: [],
-        newBadges: [],
-        newRewards: [],
-      };
-    }
-
-    const levelBonus = opts.bonusMultiplier ?? (await getLevelBonusMultiplier(user.level, tx));
-    const rawXp = Math.round((base + (opts.bonusFlat ?? 0)) * levelBonus);
-    const previousLevel = user.level;
-
-    // 1) Insert XP transaction row
-    await tx.insert(xpTransactions).values({
-      userId: opts.userId,
-      amount: rawXp,
-      reason: opts.action,
-      referenceType: opts.referenceType ?? null,
-      referenceId: opts.referenceId ?? null,
-    });
-
-    // 2) Atomic XP + counter increment (single UPDATE with SQL arithmetic — race-safe)
-    const updateSet: {
-      xp: ReturnType<typeof sql>;
-      totalVideosWatched?: ReturnType<typeof sql>;
-      totalPartiesHosted?: ReturnType<typeof sql>;
-      totalFriendsInvited?: ReturnType<typeof sql>;
-    } = {
-      xp: sql`${users.xp} + ${rawXp}`,
-    };
-    if (opts.action === "watch_video") updateSet.totalVideosWatched = sql`${users.totalVideosWatched} + 1`;
-    if (opts.action === "host_party") updateSet.totalPartiesHosted = sql`${users.totalPartiesHosted} + 1`;
-    if (opts.action === "invite_friend") updateSet.totalFriendsInvited = sql`${users.totalFriendsInvited} + 1`;
-
-    await tx.update(users).set(updateSet).where(eq(users.id, opts.userId));
-
-    // Re-read the user row so we see the freshly-committed counters
-    const refreshedUser = await tx.select().from(users).where(eq(users.id, opts.userId)).then(r => r[0]);
-    const newXp = refreshedUser.xp;
-    const newLevelInfo = await getLevelForXp(newXp);
-    const newLevel = newLevelInfo.level;
-    const leveledUp = newLevel > previousLevel;
-
-    // 3) Persist the new level if raised
-    if (leveledUp) {
-      await tx.update(users).set({ level: newLevel }).where(eq(users.id, opts.userId));
-      await tx.insert(notifications).values({
-        userId: opts.userId,
-        type: "level_up",
-        title: `Level Up! 🎉 You're now level ${newLevel}`,
-        message: `You've reached "${newLevelInfo.title}". ${newLevelInfo.perk ? `Perk: ${newLevelInfo.perk}` : ""}`,
-        icon: "⬆️",
-        metadata: { level: newLevel, title: newLevelInfo.title },
-      });
-    }
-
-    // 4) XP notification (for non-level-up events)
-    if (opts.contextMessage && !leveledUp) {
-      await tx.insert(notifications).values({
-        userId: opts.userId,
-        type: "xp",
-        title: `+${rawXp} XP`,
-        message: opts.contextMessage,
-        icon: "✨",
-        metadata: { xp: rawXp, action: opts.action },
-      });
-    }
-
-    // 5) Achievement evaluation
-    const statsForAch: UserStats = {
-      xp: newXp,
-      level: newLevel,
-      videosWatched: refreshedUser.totalVideosWatched,
-      partiesHosted: refreshedUser.totalPartiesHosted,
-      friendsInvited: refreshedUser.totalFriendsInvited,
-    };
-    const newAchievements = await evaluateAchievements(tx, opts.userId, statsForAch);
-
-    // Re-read XP after achievement bonuses
-    const finalUser = await tx.select().from(users).where(eq(users.id, opts.userId)).then(r => r[0]);
-
-    // 6) Badge evaluation
-    const newBadges = await evaluateBadges(tx, opts.userId, {
-      xp: finalUser.xp,
-      level: newLevel,
-      videosWatched: finalUser.totalVideosWatched,
-      partiesHosted: finalUser.totalPartiesHosted,
-      friendsInvited: finalUser.totalFriendsInvited,
-    });
-
-    // 7) Reward evaluation (spam-safe)
-    const newRewards = await evaluateRewards(tx, opts.userId, newLevel);
-
-    return {
-      xpGained: rawXp,
-      newTotalXp: finalUser.xp,
-      previousLevel,
-      newLevel,
-      leveledUp,
-      newAchievements,
-      newBadges,
-      newRewards,
-    };
-  });
+/**
+ * Run arbitrary progression-aware work inside a transaction. Action routes
+ * use this to make their side-writes atomic with the XP grant.
+ *
+ *   await runProgressionTx(async (tx) => {
+ *     await db.insert(watchSessions)...   // use tx instead of db
+ *     const result = await awardXp({ ..., tx });
+ *     await db.update(watchParties)...    // use tx instead of db
+ *     return result;
+ *   });
+ */
+export async function runProgressionTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => fn(tx));
 }
 
 /**
@@ -422,3 +504,6 @@ export async function claimReward(userId: number, rewardId: number) {
     return { alreadyClaimed: false, reward };
   });
 }
+
+// Export log helper so other modules can use it consistently.
+export { log };

@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { awardXp, runProgressionTx } from "@/lib/progression";
 import {
   withAuth, parseJsonBody, apiError, ErrorCode,
-  checkIdempotencyKey, checkRateLimit, isNonEmptyString, isNonNegativeInt, log,
+  checkIdempotencyKey, checkRateLimit, isNonEmptyString, isNonNegativeInt, log, isIdempotencyKeyCollision, applyRateLimitHeaders,
 } from "@/lib/api-helpers";
 
 const MAX_TITLE_LENGTH = 100;
@@ -16,9 +16,12 @@ export async function POST(req: Request) {
   return withAuth(async ({ user }) => {
     const rl = checkRateLimit(`host_party:${user.id}`, RATE_LIMIT_PER_MINUTE);
     if (!rl.allowed) {
-      return apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
-        resetAt: rl.resetAt,
-      });
+      return applyRateLimitHeaders(
+        apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
+          resetAt: rl.resetAt,
+        }),
+        rl,
+      );
     }
 
     const body = await parseJsonBody<{
@@ -80,12 +83,23 @@ export async function POST(req: Request) {
         return { party, result };
       });
 
-      return NextResponse.json({
-        success: true,
-        party: { id: out.party.id, title: out.party.title, attendeeCount: attendees },
-        result: out.result,
-      });
+      return applyRateLimitHeaders(
+        NextResponse.json({
+          success: true,
+          party: { id: out.party.id, title: out.party.title, attendeeCount: attendees },
+          result: out.result,
+        }),
+        rl,
+      );
     } catch (err) {
+      if (isIdempotencyKeyCollision(err)) {
+        return NextResponse.json({
+          success: true,
+          idempotentReplay: true,
+          message: "This action was already processed.",
+          result: { xpGained: 0 },
+        });
+      }
       log("error", "host-party action failed", { userId: user.id, error: (err as Error).message });
       return apiError(500, ErrorCode.INTERNAL, "Failed to host party");
     }

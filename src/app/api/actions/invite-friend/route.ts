@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { awardXp, runProgressionTx } from "@/lib/progression";
 import {
   withAuth, parseJsonBody, apiError, ErrorCode,
-  checkIdempotencyKey, checkRateLimit, USERNAME_REGEX, log,
+  checkIdempotencyKey, checkRateLimit, USERNAME_REGEX, log, isIdempotencyKeyCollision, applyRateLimitHeaders,
 } from "@/lib/api-helpers";
 
 const RATE_LIMIT_PER_MINUTE = 10;
@@ -14,9 +14,12 @@ export async function POST(req: Request) {
   return withAuth(async ({ user }) => {
     const rl = checkRateLimit(`invite:${user.id}`, RATE_LIMIT_PER_MINUTE);
     if (!rl.allowed) {
-      return apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
-        resetAt: rl.resetAt,
-      });
+      return applyRateLimitHeaders(
+        apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
+          resetAt: rl.resetAt,
+        }),
+        rl,
+      );
     }
 
     const body = await parseJsonBody<{
@@ -72,12 +75,23 @@ export async function POST(req: Request) {
         return { invite, result };
       });
 
-      return NextResponse.json({
-        success: true,
-        invite: { id: out.invite.id, inviteeUsername: out.invite.inviteeUsername },
-        result: out.result,
-      });
+      return applyRateLimitHeaders(
+        NextResponse.json({
+          success: true,
+          invite: { id: out.invite.id, inviteeUsername: out.invite.inviteeUsername },
+          result: out.result,
+        }),
+        rl,
+      );
     } catch (err) {
+      if (isIdempotencyKeyCollision(err)) {
+        return NextResponse.json({
+          success: true,
+          idempotentReplay: true,
+          message: "This action was already processed.",
+          result: { xpGained: 0 },
+        });
+      }
       log("error", "invite-friend action failed", { userId: user.id, error: (err as Error).message });
       return apiError(500, ErrorCode.INTERNAL, "Failed to record invite");
     }

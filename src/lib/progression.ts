@@ -516,15 +516,29 @@ export async function runProgressionTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T
 }
 
 /**
+ * Custom error class for progression failures. Uses stable error codes
+ * instead of string matching, so callers don't have to parse messages.
+ */
+export class ProgressionError extends Error {
+  constructor(public code: "NOT_FOUND" | "LEVEL_TOO_LOW" | "USER_NOT_FOUND" | "ALREADY_CLAIMED", message: string) {
+    super(message);
+    this.name = "ProgressionError";
+  }
+}
+
+/**
  * Claim a reward that the user has qualified for (level >= required).
+ * Throws ProgressionError with a stable code on failure.
  */
 export async function claimReward(userId: number, rewardId: number) {
   return db.transaction(async (tx) => {
     const reward = await tx.select().from(rewards).where(eq(rewards.id, rewardId)).then(r => r[0]);
-    if (!reward) throw new Error("Reward not found");
+    if (!reward) throw new ProgressionError("NOT_FOUND", "Reward not found");
     const user = await tx.select().from(users).where(eq(users.id, userId)).then(r => r[0]);
-    if (!user) throw new Error("User not found");
-    if (user.level < reward.levelRequired) throw new Error("Level too low to claim this reward");
+    if (!user) throw new ProgressionError("USER_NOT_FOUND", "User not found");
+    if (user.level < reward.levelRequired) {
+      throw new ProgressionError("LEVEL_TOO_LOW", "Level too low to claim this reward");
+    }
 
     const existing = await tx
       .select()
@@ -533,7 +547,16 @@ export async function claimReward(userId: number, rewardId: number) {
       .then(r => r[0]);
     if (existing) return { alreadyClaimed: true, reward };
 
-    await tx.insert(userRewards).values({ userId, rewardId });
+    // Use onConflictDoNothing to gracefully handle the race where two
+    // concurrent requests both pass the `existing` check. We then re-query
+    // to determine whether we actually inserted or lost the race.
+    const result = await tx.insert(userRewards).values({ userId, rewardId }).onConflictDoNothing().returning();
+
+    if (!result || result.length === 0) {
+      // Lost the race — another concurrent request claimed first.
+      return { alreadyClaimed: true, reward };
+    }
+
     await tx.insert(notifications).values({
       userId,
       type: "reward",

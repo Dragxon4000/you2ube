@@ -15,6 +15,13 @@
       "when": 1785951571472,
       "tag": "0001_phase7_discord_integration",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785971406351,
+      "tag": "0002_add_session_token_hash",
+      "breakpoints": true
     }
   ]
 }

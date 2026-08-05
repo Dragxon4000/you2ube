@@ -1,9 +1,27 @@
 import { cookies, headers } from "next/headers";
 import { db } from "@/db";
 import { users, notifications } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import { randomBytes } from "crypto";
+import { eq, and, isNull } from "drizzle-orm";
+import { randomBytes, createHash, timingSafeEqual } from "crypto";
 import { log } from "@/lib/api-helpers";
+
+/**
+ * Hash a session token using SHA-256. Constant-time comparison is handled
+ * separately (see `safeCompareHash`) so DB-lookup timing doesn't leak whether
+ * a token exists.
+ */
+function hashSessionToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/**
+ * Constant-time comparison of two hex-encoded SHA-256 hashes. Both inputs
+ * must be the same length (64 hex chars) — callers guarantee this.
+ */
+function safeCompareHash(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, "utf-8"), Buffer.from(b, "utf-8"));
+}
 
 const SESSION_COOKIE = "you2ube_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
@@ -168,15 +186,30 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   }
 
   const username = usernameFromSession(sessionId);
+  const providedHash = hashSessionToken(sessionId);
 
-  // Try to find the existing user row.
+  // Try to find the existing user row by username.
   const existing = await db
     .select()
     .from(users)
     .where(eq(users.username, username))
     .then(r => r[0]);
 
-  if (existing) return existing;
+  if (existing) {
+    // Validate the full session token hash.
+    // If the stored hash is null (legacy user from before this fix), treat as
+    // no session — they'll need to re-authenticate.
+    // If the hash doesn't match, this is a forged cookie.
+    if (!existing.sessionTokenHash) {
+      log("warn", "Legacy session without hash — treating as invalid", { username });
+      return null;
+    }
+    if (!safeCompareHash(existing.sessionTokenHash, providedHash)) {
+      log("warn", "Forged session cookie detected", { username });
+      return null;
+    }
+    return stripSensitiveFields(existing);
+  }
 
   // Create a new user. Use onConflictDoNothing + re-read so concurrent
   // first-visit requests from the same session converge safely.
@@ -184,6 +217,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   try {
     await db.insert(users).values({
       username,
+      sessionTokenHash: providedHash,
       displayName: `Viewer ${username.slice(-4)}`,
       avatarEmoji: avatar,
       bio: "New to you2ube. Earning XP every day.",
@@ -208,6 +242,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     log("error", "User row missing immediately after insert", { username });
     return null;
   }
+  const sessionUser = stripSensitiveFields(user);
 
   // First-ever session for this user — emit a welcome notification.
   // Idempotent: only inserts if no welcome notification exists yet.
@@ -215,12 +250,12 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     const hasWelcome = await db
       .select({ id: notifications.id })
       .from(notifications)
-      .where(eq(notifications.userId, user.id))
+      .where(eq(notifications.userId, sessionUser.id))
       .limit(1)
       .then(r => r.length > 0);
     if (!hasWelcome) {
       await db.insert(notifications).values({
-        userId: user.id,
+        userId: sessionUser.id,
         type: "system",
         title: "Welcome to you2ube! 🎉",
         message: "Start watching videos, hosting watch parties, and inviting friends to earn XP and level up.",
@@ -229,5 +264,26 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     }
   }
 
-  return user;
+  return sessionUser;
+}
+
+/**
+ * Strip sensitive / internal fields from a user row before returning it
+ * as a SessionUser. Prevents accidental leakage of sessionTokenHash in
+ * API responses via JSON.stringify or spread operations.
+ */
+function stripSensitiveFields(row: typeof users.$inferSelect): SessionUser {
+  return {
+    id: row.id,
+    username: row.username,
+    displayName: row.displayName,
+    avatarEmoji: row.avatarEmoji,
+    bio: row.bio,
+    xp: row.xp,
+    level: row.level,
+    totalVideosWatched: row.totalVideosWatched,
+    totalPartiesHosted: row.totalPartiesHosted,
+    totalFriendsInvited: row.totalFriendsInvited,
+    createdAt: row.createdAt,
+  };
 }

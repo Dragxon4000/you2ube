@@ -179,6 +179,8 @@ export interface RateLimitResult {
   allowed: boolean;
   remaining: number;
   resetAt: number;
+  /** The configured limit, for inclusion in X-RateLimit-Limit header. */
+  limit: number;
 }
 
 /**
@@ -200,11 +202,34 @@ export function checkRateLimit(
 
   if (hits.length >= maxRequests) {
     rateLimitBuckets.set(key, hits);
-    return { allowed: false, remaining: 0, resetAt };
+    return { allowed: false, remaining: 0, resetAt, limit: maxRequests };
   }
   hits.push(now);
   rateLimitBuckets.set(key, hits);
-  return { allowed: true, remaining: maxRequests - hits.length, resetAt };
+  return { allowed: true, remaining: maxRequests - hits.length, resetAt, limit: maxRequests };
+}
+
+/**
+ * Apply standard rate-limit headers to a NextResponse. Uses the IETF
+ * RateLimit Headers draft (draft-ietf-httpapi-ratelimit-headers):
+ *   - `RateLimit-Limit`     — max requests in the window
+ *   - `RateLimit-Remaining` — requests left in the current window
+ *   - `RateLimit-Reset`     — seconds until the window resets
+ *
+ * Also sets the legacy `X-RateLimit-*` variants for older clients.
+ */
+export function applyRateLimitHeaders<T>(
+  response: NextResponse<T>,
+  rl: RateLimitResult,
+): NextResponse<T> {
+  const resetSeconds = Math.max(0, Math.ceil((rl.resetAt - Date.now()) / 1000));
+  response.headers.set("RateLimit-Limit", String(rl.limit));
+  response.headers.set("RateLimit-Remaining", String(rl.remaining));
+  response.headers.set("RateLimit-Reset", String(resetSeconds));
+  response.headers.set("X-RateLimit-Limit", String(rl.limit));
+  response.headers.set("X-RateLimit-Remaining", String(rl.remaining));
+  response.headers.set("X-RateLimit-Reset", String(resetSeconds));
+  return response;
 }
 
 // Periodically clear stale buckets to prevent unbounded memory growth.
@@ -242,3 +267,50 @@ export function isNonEmptyString(v: unknown, maxLen = 1000): v is string {
 }
 
 export const USERNAME_REGEX = /^[a-zA-Z0-9_-]{2,30}$/;
+
+/**
+ * Detect Postgres unique-constraint violations specifically on the
+ * idempotency-key index (`xp_tx_idem_key_idx`). Postgres error code
+ * `23505` = unique_violation. We also check the error message to make
+ * sure it's the idempotency index, not some other unique constraint.
+ *
+ * This lets action routes gracefully convert race-condition collisions
+ * into the correct `idempotentReplay: true` response instead of a 500.
+ */
+/**
+ * Unwrap an error to find the underlying Postgres error. Drizzle wraps
+ * the original pg error, typically in a `cause` property.
+ */
+function unwrapPgError(err: unknown): { code?: string; message?: string; constraint?: string } | null {
+  if (!err || typeof err !== "object") return null;
+  let current: unknown = err;
+  for (let i = 0; i < 5; i++) {
+    if (!current || typeof current !== "object") return null;
+    const e = current as { code?: string; message?: string; constraint?: string; cause?: unknown };
+    if (e.code && e.code.length === 5 && /^\d{2}[A-Z0-9]{3}$/.test(e.code)) {
+      // Looks like a Postgres SQLSTATE code (e.g., "23505").
+      return { code: e.code, message: e.message, constraint: e.constraint };
+    }
+    current = e.cause;
+  }
+  // Fallback: return the top-level error's message so callers can still
+  // pattern-match on it (e.g., check for "duplicate key" text).
+  const top = err as { message?: string };
+  return { code: undefined, message: top.message, constraint: undefined };
+}
+
+export function isIdempotencyKeyCollision(err: unknown): boolean {
+  const pg = unwrapPgError(err);
+  if (!pg) return false;
+  // 23505 = unique_violation
+  if (pg.code === "23505") {
+    const constraint = pg.constraint ?? "";
+    const message = pg.message ?? "";
+    return constraint.includes("idem") || message.includes("idem") || constraint.includes("xp_tx");
+  }
+  // Fallback: pattern-match on the message when the SQLSTATE is unavailable
+  // (some Drizzle versions don't forward `code` from pg).
+  const msg = (pg.message ?? "").toLowerCase();
+  return (msg.includes("duplicate key") || msg.includes("unique constraint")) &&
+         (msg.includes("xp_tx_idem_key_idx") || msg.includes("idempotency"));
+}

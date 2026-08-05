@@ -28,6 +28,7 @@ export const users = pgTable(
   {
     id: serial("id").primaryKey(),
     username: text("username").notNull(),
+    sessionTokenHash: text("session_token_hash"),
     displayName: text("display_name").notNull(),
     avatarEmoji: text("avatar_emoji").notNull().default("🎬"),
     bio: text("bio").notNull().default(""),
@@ -41,6 +42,8 @@ export const users = pgTable(
   },
   (t) => ({
     usernameIdx: uniqueIndex("users_username_idx").on(t.username),
+    // Hash of the full session token — used for cookie validation on every request.
+    sessionTokenHashIdx: index("users_session_token_hash_idx").on(t.sessionTokenHash),
     // DESC index on xp — leaderboard is a hot query.
     xpDescIdx: index("users_xp_desc_idx").on(sql`${t.xp} DESC`),
     levelIdx: index("users_level_idx").on(t.level),

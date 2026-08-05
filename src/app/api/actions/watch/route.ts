@@ -4,7 +4,7 @@ import { eq, and, gte, sql } from "drizzle-orm";
 import { awardXp, runProgressionTx } from "@/lib/progression";
 import {
   withAuth, parseJsonBody, apiError, ErrorCode,
-  checkIdempotencyKey, checkRateLimit, isPositiveInt, log,
+  checkIdempotencyKey, checkRateLimit, isPositiveInt, log, isIdempotencyKeyCollision, applyRateLimitHeaders,
 } from "@/lib/api-helpers";
 
 const MAX_VIDEO_ID = 1_000_000;
@@ -16,9 +16,10 @@ export async function POST(req: Request) {
     // Rate limit.
     const rl = checkRateLimit(`watch:${user.id}`, RATE_LIMIT_PER_MINUTE);
     if (!rl.allowed) {
-      return apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
+      const resp = apiError(429, ErrorCode.RATE_LIMITED, "Too many requests. Try again in a minute.", {
         resetAt: rl.resetAt,
       });
+      return applyRateLimitHeaders(resp, rl);
     }
 
     const body = await parseJsonBody<{ videoId?: unknown; idempotencyKey?: unknown }>(req);
@@ -105,17 +106,34 @@ export async function POST(req: Request) {
           result: null,
         });
       }
-      return NextResponse.json({
-        success: true,
-        alreadyWatchedToday: false,
-        video: {
-          id: result.video.id,
-          title: result.video.title,
-          thumbnailEmoji: result.video.thumbnailEmoji,
-        },
-        result: result.result,
-      });
+      return applyRateLimitHeaders(
+        NextResponse.json({
+          success: true,
+          alreadyWatchedToday: false,
+          video: {
+            id: result.video.id,
+            title: result.video.title,
+            thumbnailEmoji: result.video.thumbnailEmoji,
+          },
+          result: result.result,
+        }),
+        rl,
+      );
     } catch (err) {
+      // Detect unique constraint violation on the idempotency key — this
+      // happens when two concurrent requests race past the pre-check and
+      // both try to insert the same key. Treat as idempotent replay.
+      if (isIdempotencyKeyCollision(err)) {
+        return applyRateLimitHeaders(
+          NextResponse.json({
+            success: true,
+            idempotentReplay: true,
+            message: "This action was already processed.",
+            result: { xpGained: 0 },
+          }),
+          rl,
+        );
+      }
       log("error", "watch action failed", { userId: user.id, videoId, error: (err as Error).message });
       return apiError(500, ErrorCode.INTERNAL, "Failed to record watch");
     }

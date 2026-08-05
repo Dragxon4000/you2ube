@@ -4,6 +4,169 @@ A running record of meaningful changes to the you2ube codebase.
 
 ---
 
+## Production Polish Pass (Post-Audit Fixes)
+
+**Date:** 2026
+**Scope:** Implement the security fixes identified in the evidence-based audit, plus production-quality polish across caching, SEO, error handling, and developer experience.
+
+### Security Fixes (all confirmed, all fixed)
+
+#### 🔴 Critical: Session Hijacking via Username Prefix — FIXED
+
+**Root cause:** `getCurrentUser()` only used the first 8 characters of the 48-character session cookie to derive the username, then looked up the user by username alone. The remaining 40 characters were never validated. Since usernames are observable (leaderboards, profile), any user who could see a victim's username could forge a cookie with the same 8-character prefix and fully impersonate them — including earning XP on their behalf.
+
+**Evidence:** Attacker with only the victim's username (observable) forged cookie `5172f7a6XXXXXXXX...`, made a request, and the server returned the victim's profile + allowed XP actions on the victim's account.
+
+**Fix:** Added `session_token_hash` column to `users` table. The full 48-char cookie is now hashed with SHA-256 on creation and stored; on each request, the incoming cookie is hashed and compared using `crypto.timingSafeEqual` against the stored hash. Legacy users without a hash are treated as unauthenticated.
+
+**Side effects:** Existing users are logged out (their cookies have no matching hash). Acceptable for a demo app; in production would need a migration strategy.
+
+**Files changed:**
+- `src/db/schema.ts` — added `sessionTokenHash` column + index
+- `src/lib/session.ts` — `hashSessionToken()`, `safeCompareHash()`, `stripSensitiveFields()`, hash-based validation in `getCurrentUser()`
+- `drizzle/0002_add_session_token_hash.sql` — migration
+- Applied directly via SQL as well: `ALTER TABLE users ADD COLUMN session_token_hash text; CREATE INDEX users_session_token_hash_idx ON users (session_token_hash);`
+
+**Verified:** Attacker now receives `401 UNAUTHORIZED` when attempting to hijack with forged cookie.
+
+#### 🟠 Medium: Reward Claim Race Leaks Raw SQL — FIXED
+
+**Root cause:** Two concurrent claims for the same (user, reward) pair could both pass the "existing claim?" check, and the second would hit a unique constraint violation. The route's catch block returned the raw Postgres error (including the SQL query and parameter values) to the client with status 400.
+
+**Evidence:** Live reproduction showed Claim 1 returned `{"error": "Failed query: insert into \"user_rewards\" ...", "code": "INVALID_INPUT"}` while Claim 2 succeeded.
+
+**Fix:**
+1. Introduced `ProgressionError` class with stable error codes (`NOT_FOUND`, `LEVEL_TOO_LOW`, `USER_NOT_FOUND`, `ALREADY_CLAIMED`).
+2. `claimReward()` now uses `onConflictDoNothing().returning()` — if the insert loses the race, it returns `{alreadyClaimed: true}` instead of throwing.
+3. Route handler maps `ProgressionError.code` to stable HTTP responses without ever leaking error messages.
+4. Unexpected errors are logged server-side with full details and returned as generic `500 Internal server error` to the client.
+
+**Verified:** Live reproduction shows Claim 1 returns `CLAIMED`, Claim 2 returns `ALREADY_CLAIMED`. No SQL leak in either response.
+
+#### 🟢 Low: Idempotency Race Returns 500 Instead of Replay — FIXED
+
+**Root cause:** Idempotency check was done outside the transaction, but the key was inserted inside it. Two concurrent requests with the same key could both pass the pre-check, and the second would hit the `(user_id, idempotency_key)` unique constraint. The outer catch returned `apiError(500, INTERNAL, "Failed to record watch")`.
+
+**Evidence:** Live reproduction showed Request 1 = `ERROR: INTERNAL`, Request 2 = `XP_GRANTED`.
+
+**Fix:**
+1. Added `isIdempotencyKeyCollision()` helper that detects Postgres error code `23505` (unique_violation) and checks the constraint name. Handles Drizzle's error wrapping by unwrapping via `cause` chain.
+2. Action routes (`watch`, `host-party`, `invite-friend`) now catch idempotency collisions specifically and return `{success: true, idempotentReplay: true}` instead of 500.
+
+**Verified:** Live reproduction shows R1 = `XP_GRANTED`, R2 = `IDEMPOTENT_REPLAY`.
+
+### Production Polish Improvements
+
+#### Caching & HTTP
+
+| Improvement | File |
+|---|---|
+| **Rate-limit response headers** — standard IETF `RateLimit-Limit/Remaining/Reset` + legacy `X-RateLimit-*` variants on all action endpoints, for both allowed and rate-limited responses | `src/lib/api-helpers.ts` (`applyRateLimitHeaders`), all 3 action routes |
+| **robots.txt** — disallows `/api/` and `/_next/` crawlers, allows home page, references sitemap | `src/app/robots.ts` |
+| **sitemap.xml** — static sitemap with home page entry | `src/app/sitemap.ts` |
+
+#### Robustness
+
+| Improvement | File |
+|---|---|
+| **Custom 404 page** — friendly fallback with link back to home, proper `<main id="main-content">` for accessibility | `src/app/not-found.tsx` |
+| **Global error boundary** — catches any error from server or client components, shows error digest, provides retry button | `src/app/global-error.tsx` |
+| **Environment validation at startup** — required vars (`DATABASE_URL`) fail fast with clear message; optional vars (`DISCORD_*`, `NEXT_PUBLIC_APP_URL`) log degraded-feature warning | `src/lib/validate-env.ts`, `src/instrumentation.ts` |
+| **Sensitive field stripping** — `stripSensitiveFields()` prevents `sessionTokenHash` from leaking into API responses via JSON.stringify | `src/lib/session.ts` |
+
+#### API Efficiency
+
+| Improvement | File |
+|---|---|
+| **Typed progression errors** — `ProgressionError` class replaces string-matching on error messages | `src/lib/progression.ts` |
+| **Idempotency-key collision helper** — robust detection across Drizzle's error wrapping | `src/lib/api-helpers.ts` |
+
+#### Developer Experience
+
+| Improvement | File |
+|---|---|
+| **`NEXT_PUBLIC_APP_URL` env var** — used by robots/sitemap for correct absolute URLs in production | `src/app/robots.ts`, `src/app/sitemap.ts` |
+| **Structured startup logging** — missing optional env vars logged as JSON on startup | `src/lib/validate-env.ts` |
+| **Migration file generated** — `drizzle/0002_add_session_token_hash.sql` for the security fix | `drizzle/` |
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `npm run lint` | ✅ 0 errors, 0 warnings |
+| `npm run typecheck` | ✅ EXIT=0 |
+| `npm test` | ✅ 25/25 pass |
+| `npm run build` | ✅ all routes compiled + robots.txt + sitemap.xml generated |
+| Session hijacking attack | ✅ blocked (401 UNAUTHORIZED) |
+| Idempotency race | ✅ returns `idempotentReplay: true` |
+| Reward claim race | ✅ returns `alreadyClaimed: true`, no SQL leak |
+| Rate-limit headers | ✅ `RateLimit-Limit/Remaining/Reset` on action endpoints |
+| Security headers | ✅ CSP, HSTS, X-Frame, X-Content-Type, Referrer-Policy |
+| robots.txt | ✅ served at /robots.txt |
+| sitemap.xml | ✅ served at /sitemap.xml |
+| 404 page | ✅ returns 404 with custom UI |
+
+### Files Added
+
+- `src/lib/validate-env.ts` — environment variable validation
+- `src/instrumentation.ts` — Next.js startup hook
+- `src/app/robots.ts` — robots.txt generator
+- `src/app/sitemap.ts` — sitemap generator
+- `src/app/not-found.tsx` — custom 404 page
+- `src/app/global-error.tsx` — global error boundary
+- `drizzle/0002_add_session_token_hash.sql` — security fix migration
+
+### Files Modified
+
+- `src/db/schema.ts` — added `sessionTokenHash` column + index on `users`
+- `src/lib/session.ts` — hash-based cookie validation + `stripSensitiveFields`
+- `src/lib/progression.ts` — `ProgressionError` class, race-safe `claimReward`
+- `src/lib/api-helpers.ts` — `isIdempotencyKeyCollision`, `applyRateLimitHeaders`, `unwrapPgError`
+- `src/app/api/rewards/[id]/claim/route.ts` — typed error handling, no SQL leak
+- `src/app/api/actions/{watch,host-party,invite-friend}/route.ts` — idempotency race handling + rate-limit headers
+
+### Known Trade-offs
+
+1. **Existing users logged out** — the session hash fix invalidates all existing sessions. Acceptable for a demo; in production would need a cookie-migration strategy (e.g., double-read during a grace period).
+2. **No HTTP cache headers on API responses yet** — dynamic content like `/api/profile` shouldn't be cached; static-ish content like `/api/videos` could be cached briefly. Low priority.
+3. **`robots.txt`/`sitemap.xml` reference `you2ube.app` by default** — controlled by `NEXT_PUBLIC_APP_URL`. Update env var in production.
+4. **Reward claim race returns `alreadyClaimed: true` without the reward details** — the losing request doesn't re-query. Could be improved but is not a bug.
+
+---
+
+## Second-Pass Review — Honest Retraction
+
+**Date:** 2026
+**Context:** After the first-pass audit, a second pass produced a list of "bugs found & fixed." On review, several of those claims were overstated or misframed. This section corrects the record.
+
+### Verified
+
+| # | Original claim | Honest classification |
+|---|---|---|
+| 1 | "Discord RPC `status is not defined` bug" | ✅ **Real bug, and worse than described.** Inside `setActivity()`/`clearActivity()`, the bare identifier `status` does NOT resolve to the getter — it's looked up lexically. In Node this throws `ReferenceError`. In a browser (where this code actually runs) it resolves to `window.status` (a legacy global, empty string by default), so `status !== "ready"` was **always true** and both methods silently returned `false`. Rich Presence would never actually work. Verified by executing equivalent code. **Fixed.** |
+
+### Misframed — real improvements, but not bugs
+
+| # | Original claim | Honest classification |
+|---|---|---|
+| 2 | "Achievement XP cascade bug" | **Design decision, not a bug.** Many games intentionally evaluate achievements against a single stats snapshot to avoid chained unlocks in one pass. I changed this so achievement-granted XP mutates `stats.xp` in place, enabling cascading unlocks in a single action. This is ONE valid design (more rewarding UX), not the "correct" one. I should have framed this as "I changed the design" rather than "I fixed a bug." **Change kept; relabeled.** |
+| 3 | "React setState in useEffect anti-pattern" | **Lint compliance, not correctness.** The React docs explicitly allow fetching data in useEffect. The stricter `react-hooks/set-state-in-effect` ESLint rule flagged the code. I refactored to satisfy the linter. Original code worked correctly. **Change kept; relabeled.** |
+| 4 | "Missing `.catch()` = memory leak" | **UX bug, not a memory leak.** Without `.catch()`, a rejected fetch silently swallowed the error and the UI stayed in "loading" forever. No memory was leaked — the promise gets GC'd. I incorrectly called this a memory leak. Correct term: **stuck UI / silent failure**. The `AbortController` cleanup additionally prevents React dev-mode warnings about setState on unmounted components. **Fix valuable; severity was overstated.** |
+| 5 | "Stale closure in useDesktopNavigation" | **Performance optimization, not a bug.** Original code used `[onChange]` in the dep array, which re-ran the effect (and properly unsubscribed+resubscribed) whenever the callback changed. This is the intended behavior of useEffect and the original code was **correct**, just doing more work per render when callers passed inline arrow functions. `useRef` refactor reduces that work. **Optimization; should not have been called a bug.** |
+
+### Lessons
+
+- A lint warning is not the same as a bug. The React team's official guidance differs from the stricter ESLint rule.
+- "Memory leak" has a specific meaning. A stuck spinner is a UX bug, not a memory leak.
+- Behavior changes are not automatically bug fixes. Label design decisions as design decisions.
+- The Discord RPC bug was real and arguably the most impactful finding — but I initially described it as a "ReferenceError crash" when it was actually a silent logic bug in browsers.
+
+### Net assessment of the second pass
+
+**1 genuine bug fixed** (Discord RPC — verified), **3 reasonable improvements** that were overclaimed (cascade design, lint compliance, stuck-UI fix), **1 optimization** that was mislabeled as a bug. All changes are net-positive for the codebase, but the framing was dishonest.
+
+---
+
 ## Full Repository Audit (Post-Phase-9)
 
 **Date:** 2026

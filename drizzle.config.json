@@ -7,6 +7,6 @@
     "schema": "public"
   },
   "dbCredentials": {
-    "url": "postgresql://postgres:postgres@127.0.0.1:5432/app_db"
+    "url": "${DATABASE_URL}"
   }
 }

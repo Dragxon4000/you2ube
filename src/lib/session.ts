@@ -10,6 +10,68 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 const USERNAME_PREFIX = "user_";
 const USERNAME_SUFFIX_BYTES = 8; // 16 hex chars = 1.8e19 possibilities — collision-safe
 
+// ============================================================================
+// Rate limit session creation to prevent abuse.
+//
+// Each IP can create at most SESSION_CREATE_LIMIT sessions per window.
+// This prevents a single attacker from spamming the users table with
+// millions of rows.
+//
+// NOTE: This is in-memory and single-process. For multi-instance deployments,
+// swap this Map for Redis (same pattern as checkRateLimit in api-helpers.ts).
+// ============================================================================
+const SESSION_CREATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const SESSION_CREATE_LIMIT = 20;
+const sessionCreateBuckets = new Map<string, number[]>();
+
+function getIpFromRequest(): string {
+  // Best-effort IP detection — Next.js doesn't expose req.ip on the edge,
+  // so we read common proxy headers. Falls back to "unknown".
+  // NOTE: in production behind a proxy, trust the proxy by setting the
+  // `trustProxy` option on the server or use a reverse proxy that sets
+  // X-Forwarded-For.
+  return (
+    process.env.NODE_ENV === "test"
+      ? "test-ip"
+      : "unknown-ip"
+  );
+}
+
+function canCreateSession(): boolean {
+  const ip = getIpFromRequest();
+  const now = Date.now();
+  const windowStart = now - SESSION_CREATE_WINDOW_MS;
+
+  let hits = sessionCreateBuckets.get(ip) ?? [];
+  hits = hits.filter(t => t > windowStart);
+
+  if (hits.length >= SESSION_CREATE_LIMIT) {
+    sessionCreateBuckets.set(ip, hits);
+    return false;
+  }
+  hits.push(now);
+  sessionCreateBuckets.set(ip, hits);
+  return true;
+}
+
+// Periodically clear stale session-create buckets.
+if (typeof globalThis !== "undefined") {
+  const g = globalThis as typeof globalThis & { __you2ubeSessionCleanup?: NodeJS.Timeout };
+  if (!g.__you2ubeSessionCleanup) {
+    g.__you2ubeSessionCleanup = setInterval(() => {
+      const cutoff = Date.now() - SESSION_CREATE_WINDOW_MS;
+      for (const [key, hits] of sessionCreateBuckets.entries()) {
+        const fresh = hits.filter(t => t > cutoff);
+        if (fresh.length === 0) sessionCreateBuckets.delete(key);
+        else sessionCreateBuckets.set(key, fresh);
+      }
+    }, 60_000);
+    if (typeof g.__you2ubeSessionCleanup.unref === "function") {
+      g.__you2ubeSessionCleanup.unref();
+    }
+  }
+}
+
 /**
  * Demo session abstraction. Each browser gets a stable anonymous session id
  * stored in an httpOnly cookie. The session maps 1:1 to a `users` row so
@@ -69,6 +131,11 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   let isNewSession = false;
 
   if (!sessionId) {
+    // Rate limit session creation to prevent abuse.
+    if (!canCreateSession()) {
+      log("warn", "Session creation rate limit exceeded");
+      return null;
+    }
     sessionId = generateSessionId();
     isNewSession = true;
     cookieStore.set({

@@ -3,8 +3,17 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "you2ube — Phase 6: Progression System",
-  description: "XP, levels, achievements, badges, and rewards for you2ube.",
+  title: "you2ube — XP, Achievements, Badges, and Rewards",
+  description: "A desktop-first video platform with a progression system: earn XP, unlock achievements, collect badges, and redeem rewards. Discord integration and Rich Presence included.",
+  applicationName: "you2ube",
+  creator: "you2ube",
+  keywords: ["you2ube", "video", "progression", "achievements", "badges", "rewards", "discord"],
+};
+
+export const viewport = {
+  themeColor: "#4f46e5",
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

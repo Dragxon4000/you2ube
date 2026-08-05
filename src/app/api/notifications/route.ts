@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { notifications } from "@/db/schema";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, sql } from "drizzle-orm";
 import {
   withAuth, parseJsonBody, apiError, ErrorCode, isPositiveInt, log,
 } from "@/lib/api-helpers";
@@ -13,25 +13,32 @@ export async function GET(req: Request) {
       const url = new URL(req.url);
       const limitRaw = parseInt(url.searchParams.get("limit") ?? "50", 10);
       const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, limitRaw)) : 50;
-      const cursor = url.searchParams.get("cursor");
-      const cursorDate = cursor ? new Date(cursor) : null;
-      const cursorValid = cursorDate && !Number.isNaN(cursorDate.getTime());
+      const cursorRaw = url.searchParams.get("cursor");
+      const cursorDate = cursorRaw ? new Date(cursorRaw) : null;
+      const cursorValid = !!cursorDate && !Number.isNaN(cursorDate.getTime());
 
-      const where = cursorValid
-        ? and(eq(notifications.userId, user.id), desc(notifications.createdAt))
+      // Build a where clause that includes the cursor filter when valid.
+      const whereClause = cursorValid
+        ? and(
+            eq(notifications.userId, user.id),
+            // Fetch rows strictly older than the cursor.
+            sql`${notifications.createdAt} < ${cursorDate.toISOString()}`,
+          )
         : eq(notifications.userId, user.id);
 
-      const all = await db
+      // Fetch `limit + 1` rows so we can detect whether more pages exist.
+      const rows = await db
         .select()
         .from(notifications)
-        .where(eq(notifications.userId, user.id))
+        .where(whereClause)
         .orderBy(desc(notifications.createdAt))
-        .limit(limit);
+        .limit(limit + 1);
 
-      // Simple cursor: return the last createdAt so the client can paginate.
-      const nextCursor = all.length === limit ? all[all.length - 1].createdAt.toISOString() : null;
+      const hasMore = rows.length > limit;
+      const page = hasMore ? rows.slice(0, limit) : rows;
+      const nextCursor = hasMore ? page[page.length - 1].createdAt.toISOString() : null;
 
-      return NextResponse.json({ notifications: all, nextCursor, limit });
+      return NextResponse.json({ notifications: page, nextCursor, limit });
     } catch (err) {
       log("error", "notifications GET failed", { userId: user.id, error: (err as Error).message });
       return apiError(500, ErrorCode.INTERNAL, "Failed to load notifications");

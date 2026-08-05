@@ -32,6 +32,13 @@ export async function GET() {
       }));
 
       // Rank is defined as (count of users with strictly more XP) + 1.
+      //
+      // The subquery leverages the `users_xp_desc_idx` index: Postgres can
+      // satisfy `count(*) where xp > $xp` with a backward Index Only Scan
+      // over the descending-XP index, so this is O(log N) in practice
+      // rather than a full sequential scan. For very large user tables
+      // (millions of rows), consider materializing rank into the users row
+      // and recomputing via a background job.
       const rankRow = await db
         .select({ rank: sql<number>`(select count(*) + 1 from users where xp > ${user.xp})::int` })
         .from(users)

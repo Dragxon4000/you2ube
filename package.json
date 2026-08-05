@@ -1,12 +1,20 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "you2ube-desktop",
+  "version": "1.0.0",
   "private": true,
+  "description": "you2ube — a desktop-first video platform with XP, achievements, badges, rewards, and Discord integration.",
+  "author": "you2ube",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "electron:build": "tsc -p electron/tsconfig.json",
+    "electron:dev": "./scripts/electron-dev.sh",
+    "electron:package": "./scripts/electron-build.sh",
+    "test": "node --test --import tsx --test-reporter spec src/__tests__/**/*.test.ts"
   },
   "dependencies": {
     "dotenv": "17.3.1",
@@ -18,7 +26,8 @@
     "next": "16.2.6",
     "pg": "8.20.0",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "tsx": "^4.23.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.17",

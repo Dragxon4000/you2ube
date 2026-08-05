@@ -79,12 +79,17 @@ export function ProfileCard() {
 
   if (loading || !data) {
     return (
-      <div className="rounded-3xl bg-white p-8 shadow-lg">
-        <div className="animate-pulse space-y-4">
+      <div
+        aria-busy="true"
+        aria-label="Loading profile"
+        className="rounded-3xl bg-white p-8 shadow-lg"
+      >
+        <div className="animate-pulse space-y-4" aria-hidden="true">
           <div className="h-20 w-20 rounded-full bg-slate-200"></div>
           <div className="h-6 w-48 rounded bg-slate-200"></div>
           <div className="h-4 w-64 rounded bg-slate-200"></div>
         </div>
+        <span className="sr-only">Loading your profile…</span>
       </div>
     );
   }
@@ -133,29 +138,36 @@ export function ProfileCard() {
           </div>
         </div>
 
-        {/* XP Progress Bar */}
-        <div className="mt-8">
-          <div className="mb-2 flex items-center justify-between text-sm">
-            <span className="font-medium text-slate-700">
-              {progress.xpIntoLevel} / {progress.xpNeededForLevel} XP
-            </span>
-            {progress.nextLevel && (
-              <span className="text-slate-500">
-                Next: Level {progress.nextLevel} — {progress.nextTitle}
+          {/* XP Progress Bar */}
+          <div className="mt-8" aria-label={`Level progress: ${progress.percent}% toward level ${progress.nextLevel ?? 'max'}`}>
+            <div className="mb-2 flex items-center justify-between text-sm">
+              <span className="font-medium text-slate-700">
+                <span id="xp-current">{progress.xpIntoLevel}</span> / <span id="xp-needed">{progress.xpNeededForLevel}</span> XP
               </span>
-            )}
-          </div>
-          <div className="h-4 overflow-hidden rounded-full bg-slate-200">
+              {progress.nextLevel && (
+                <span className="text-slate-500">
+                  Next: Level {progress.nextLevel} — {progress.nextTitle}
+                </span>
+              )}
+            </div>
             <div
-              className="h-full rounded-full transition-all duration-500"
-              style={{
-                width: `${progress.percent}%`,
-                backgroundColor: level.colorHex,
-              }}
-            />
+              role="progressbar"
+              aria-valuenow={progress.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`XP progress: ${progress.percent}%`}
+              className="h-4 overflow-hidden rounded-full bg-slate-200"
+            >
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{
+                  width: `${progress.percent}%`,
+                  backgroundColor: level.colorHex,
+                }}
+              />
+            </div>
+            <div className="mt-1 text-right text-xs text-slate-500">{progress.percent}% to next level</div>
           </div>
-          <div className="mt-1 text-right text-xs text-slate-500">{progress.percent}% to next level</div>
-        </div>
 
         {/* Stats Grid */}
         <div className="mt-8 grid grid-cols-3 gap-4">

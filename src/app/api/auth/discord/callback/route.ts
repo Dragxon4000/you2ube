@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { timingSafeEqual } from "crypto";
 import { db } from "@/db";
 import { discordAccounts } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -11,6 +12,20 @@ import {
 import { apiError, ErrorCode, log, withAuth } from "@/lib/api-helpers";
 
 const STATE_COOKIE = "discord_oauth_state";
+
+/**
+ * Timing-safe string comparison to prevent timing attacks on the OAuth state.
+ * Without this, an attacker could incrementally guess the state token one
+ * character at a time by measuring response latency.
+ */
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    // Still do a comparison to keep timing constant relative to input length.
+    timingSafeEqual(Buffer.from(a, "utf-8"), Buffer.from(a, "utf-8"));
+    return false;
+  }
+  return timingSafeEqual(Buffer.from(a, "utf-8"), Buffer.from(b, "utf-8"));
+}
 
 /**
  * GET /api/auth/discord/callback — Discord redirects here after authorization.
@@ -41,11 +56,11 @@ export async function GET(req: Request) {
       return apiError(400, ErrorCode.INVALID_INPUT, "Missing code or state");
     }
 
-    // CSRF check.
+    // CSRF check using timing-safe comparison.
     const cookieStore = await cookies();
     const expected = cookieStore.get(STATE_COOKIE)?.value;
     cookieStore.delete(STATE_COOKIE);
-    if (!expected || expected !== state) {
+    if (!expected || !safeCompare(expected, state)) {
       log("warn", "Discord OAuth state mismatch", { userId: user.id });
       return NextResponse.redirect(`${appUrl}/?discord=error&reason=state_mismatch`);
     }

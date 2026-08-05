@@ -16,15 +16,7 @@ export type SessionUser = {
   profile: {
     id: string;
     displayName: string;
-    bio: string | null;
-    location: string | null;
-    websiteUrl: string | null;
     avatarUrl: string | null;
-    avatarPath: string | null;
-    profileVisibility: "public" | "friends" | "private";
-    showWatchHistory: boolean;
-    showXp: boolean;
-    showAchievements: boolean;
   } | null;
 };
 
@@ -80,15 +72,7 @@ export async function getUserByToken(token: string): Promise<SessionUser | null>
       createdAt: users.createdAt,
       profileId: profiles.id,
       displayName: profiles.displayName,
-      bio: profiles.bio,
-      location: profiles.location,
-      websiteUrl: profiles.websiteUrl,
       avatarUrl: profiles.avatarUrl,
-      avatarPath: profiles.avatarPath,
-      profileVisibility: profiles.profileVisibility,
-      showWatchHistory: profiles.showWatchHistory,
-      showXp: profiles.showXp,
-      showAchievements: profiles.showAchievements,
     })
     .from(sessions)
     .innerJoin(users, eq(sessions.userId, users.id))
@@ -108,15 +92,7 @@ export async function getUserByToken(token: string): Promise<SessionUser | null>
       ? {
           id: row.profileId,
           displayName: row.displayName ?? row.email,
-          bio: row.bio,
-          location: row.location,
-          websiteUrl: row.websiteUrl,
           avatarUrl: row.avatarUrl,
-          avatarPath: row.avatarPath,
-          profileVisibility: row.profileVisibility ?? "public",
-          showWatchHistory: row.showWatchHistory ?? true,
-          showXp: row.showXp ?? true,
-          showAchievements: row.showAchievements ?? true,
         }
       : null,
   };

@@ -1,28 +1,12 @@
 import { NextResponse } from "next/server";
+import { db } from "@/db";
+import { watchSessions } from "@/db/schema";
 import { getSessionUser } from "@/lib/auth/session";
-import { isValidYouTubeVideoId } from "@/lib/youtube";
-import {
-  getRecentWatchSessions,
-  MAX_TRACKED_PLAYBACK_SECONDS,
-  saveWatchProgress,
-} from "@/lib/watch-sessions";
-
-function optionalText(value: unknown, maxLength: number): string | null {
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  return text ? text.slice(0, maxLength) : null;
-}
-
-function asTrackedSeconds(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return Math.min(Math.max(Math.floor(value), 0), MAX_TRACKED_PLAYBACK_SECONDS);
-}
+import { awardXp, XP_REWARDS } from "@/lib/xp";
+import { and, eq, desc } from "drizzle-orm";
 
 /**
- * POST /api/watch
- * Persists an authenticated user's actual YouTube IFrame Player position.
- * This endpoint receives metadata and timing only; it never receives,
- * downloads, transforms, or proxies video bytes.
+ * POST /api/watch — start or update a watch session.
  */
 export async function POST(request: Request) {
   const user = await getSessionUser();
@@ -37,73 +21,106 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const input = (body ?? {}) as Record<string, unknown>;
-  const videoId = optionalText(input.videoId, 32);
-  const videoTitle = optionalText(input.videoTitle, 500);
-  const channelName = optionalText(input.channelName, 250);
-  const thumbnailUrl = optionalText(input.thumbnailUrl, 1_000);
-  const durationSeconds = asTrackedSeconds(input.durationSeconds);
-  const positionSeconds = asTrackedSeconds(input.positionSeconds);
-  const completed = input.completed === true;
+  const {
+    videoId,
+    videoTitle,
+    channelName,
+    thumbnailUrl,
+    durationSeconds,
+    watchedSeconds,
+  } = (body ?? {}) as {
+    videoId?: string;
+    videoTitle?: string;
+    channelName?: string;
+    thumbnailUrl?: string;
+    durationSeconds?: number;
+    watchedSeconds?: number;
+  };
 
-  if (!videoId || !isValidYouTubeVideoId(videoId)) {
-    return NextResponse.json({ error: "Invalid YouTube video ID." }, { status: 400 });
+  if (!videoId || typeof videoId !== "string") {
+    return NextResponse.json({ error: "Missing videoId." }, { status: 400 });
   }
-  if (!videoTitle) {
-    return NextResponse.json({ error: "Missing video title." }, { status: 400 });
+  if (!videoTitle || typeof videoTitle !== "string") {
+    return NextResponse.json({ error: "Missing videoTitle." }, { status: 400 });
   }
-  if (positionSeconds === null) {
-    return NextResponse.json({ error: "Playback position is required." }, { status: 400 });
-  }
-  if (input.durationSeconds !== null && input.durationSeconds !== undefined && durationSeconds === null) {
-    return NextResponse.json({ error: "Invalid video duration." }, { status: 400 });
-  }
-  if (thumbnailUrl) {
-    try {
-      const url = new URL(thumbnailUrl);
-      if (url.protocol !== "https:") throw new Error("Avatar URL must use HTTPS.");
-    } catch {
-      return NextResponse.json({ error: "Invalid thumbnail URL." }, { status: 400 });
+
+  // Find existing session for this user + video
+  const existing = await db
+    .select()
+    .from(watchSessions)
+    .where(and(eq(watchSessions.userId, user.id), eq(watchSessions.videoId, videoId)))
+    .limit(1);
+
+  const watched = Math.max(0, Math.floor(watchedSeconds ?? 0));
+  const duration = durationSeconds ? Math.max(0, Math.floor(durationSeconds)) : null;
+  const completed = duration ? watched >= duration * 0.9 : false;
+
+  if (existing.length > 0) {
+    // Update existing session
+    const session = existing[0];
+    const wasCompleted = session.completed;
+
+    await db
+      .update(watchSessions)
+      .set({
+        watchedSeconds: Math.max(session.watchedSeconds, watched),
+        completed: completed || session.completed,
+        lastWatchedAt: new Date(),
+        videoTitle,
+        channelName: channelName ?? session.channelName,
+        thumbnailUrl: thumbnailUrl ?? session.thumbnailUrl,
+        durationSeconds: duration ?? session.durationSeconds,
+      })
+      .where(eq(watchSessions.id, session.id));
+
+    // Award completion XP only the first time
+    if (completed && !wasCompleted) {
+      await awardXp(user.id, XP_REWARDS.watch_complete, "watch_complete", session.id);
     }
+
+    return NextResponse.json({ sessionId: session.id, updated: true });
   }
 
-  try {
-    const result = await saveWatchProgress({
+  // Create new watch session
+  const [session] = await db
+    .insert(watchSessions)
+    .values({
       userId: user.id,
       videoId,
       videoTitle,
-      channelName,
-      thumbnailUrl,
-      durationSeconds,
-      positionSeconds,
+      channelName: channelName ?? null,
+      thumbnailUrl: thumbnailUrl ?? null,
+      durationSeconds: duration,
+      watchedSeconds: watched,
       completed,
-    });
+    })
+    .returning();
 
-    return NextResponse.json({
-      sessionId: result.session.id,
-      created: result.created,
-      completedNow: result.completedNow,
-      resumePositionSeconds: result.session.resumePositionSeconds,
-    });
-  } catch (error) {
-    console.error("[watch] Unable to save playback progress:", error);
-    return NextResponse.json({ error: "Unable to save playback progress." }, { status: 500 });
+  // Award XP for starting a watch session
+  await awardXp(user.id, XP_REWARDS.watch_session, "watch_session", session.id);
+
+  if (completed) {
+    await awardXp(user.id, XP_REWARDS.watch_complete, "watch_complete", session.id);
   }
+
+  return NextResponse.json({ sessionId: session.id, created: true });
 }
 
-/** GET /api/watch — returns the current user's latest resumable watch sessions. */
-export async function GET(request: Request) {
+/**
+ * GET /api/watch — get recent watch history.
+ */
+export async function GET() {
   const user = await getSessionUser();
   if (!user) {
     return NextResponse.json({ error: "Not authenticated." }, { status: 401 });
   }
 
-  const rawLimit = new URL(request.url).searchParams.get("limit");
-  const limit = rawLimit ? Number.parseInt(rawLimit, 10) : 50;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
-    return NextResponse.json({ error: "Limit must be an integer between 1 and 50." }, { status: 400 });
-  }
+  const history = await db
+    .select()
+    .from(watchSessions)
+    .where(eq(watchSessions.userId, user.id))
+    .orderBy(desc(watchSessions.lastWatchedAt))
+    .limit(50);
 
-  const history = await getRecentWatchSessions(user.id, limit);
   return NextResponse.json({ history });
 }

@@ -64,25 +64,9 @@ export default async function DashboardPage() {
             </div>
             <span className="text-yellow-400 font-medium">{totalXp} XP</span>
           </div>
-          <Link href="/social" className="hidden text-sm font-medium text-slate-400 hover:text-white sm:inline">
-            Social
-          </Link>
-          <Link href={`/users/${user.id}`} className="hidden text-sm font-medium text-slate-400 hover:text-white sm:inline">
-            Public profile
-          </Link>
-          <Link href="/profile" className="flex items-center gap-2 rounded-full border border-slate-800 py-1 pl-1 pr-3 transition hover:bg-slate-900">
-            <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-slate-800 text-xs font-bold text-slate-400">
-              {user.profile?.avatarUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={user.profile.avatarUrl} alt="Avatar" className="h-full w-full object-cover" />
-              ) : (
-                (user.profile?.displayName ?? user.email).slice(0, 1).toUpperCase()
-              )}
-            </span>
-            <span className="hidden text-sm text-slate-300 sm:inline">
-              {user.profile?.displayName ?? user.email}
-            </span>
-          </Link>
+          <span className="text-sm text-slate-400">
+            {user.profile?.displayName ?? user.email}
+          </span>
           <LogoutButton />
         </div>
       </nav>
@@ -133,9 +117,9 @@ export default async function DashboardPage() {
           <SearchBar />
         </section>
 
-        {/* Watch History / Continue Watching */}
+        {/* Watch History */}
         <section>
-          <h2 className="text-lg font-semibold text-white mb-4">📺 Continue Watching</h2>
+          <h2 className="text-lg font-semibold text-white mb-4">📺 Recent Watch History</h2>
           {recentWatches.length === 0 ? (
             <div className="rounded-2xl bg-slate-900 border border-slate-800 p-8 text-center">
               <p className="text-slate-400">No watch history yet.</p>
@@ -151,7 +135,6 @@ export default async function DashboardPage() {
               channelName: s.channelName,
               thumbnailUrl: s.thumbnailUrl,
               watchedSeconds: s.watchedSeconds,
-              resumePositionSeconds: s.resumePositionSeconds,
               durationSeconds: s.durationSeconds,
               completed: s.completed,
               lastWatchedAt: s.lastWatchedAt.toISOString(),

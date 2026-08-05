@@ -6,17 +6,10 @@ import { SESSION_COOKIE_NAME, getUserByToken } from "@/lib/auth/session";
 // default, which lets us query PostgreSQL directly via `pg`/Drizzle instead
 // of maintaining a second, edge-compatible auth mechanism.
 export const config = {
-  matcher: [
-    "/dashboard/:path*",
-    "/profile/:path*",
-    "/watch/:path*",
-    "/social/:path*",
-    "/login",
-    "/signup",
-  ],
+  matcher: ["/dashboard/:path*", "/login", "/signup"],
 };
 
-const PROTECTED_PREFIXES = ["/dashboard", "/profile", "/watch", "/social"];
+const PROTECTED_PREFIXES = ["/dashboard"];
 const AUTH_ONLY_PAGES = ["/login", "/signup"];
 
 export async function proxy(request: NextRequest) {

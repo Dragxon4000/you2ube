@@ -1,214 +1,236 @@
 # you2ube
 
-A production-oriented YouTube + social desktop-style web application built with Next.js App Router, PostgreSQL, Drizzle ORM, official YouTube APIs, and server-side Supabase Storage integration.
+Desktop-first video platform with a progression system (XP, levels, achievements, badges, rewards) and Discord integration. Built with **Next.js 16**, **PostgreSQL**, **Drizzle ORM**, **Tailwind CSS**, and wrapped in **Electron** for the desktop client.
 
-## Current architecture
+## Features
 
-### Authentication
+- 🎯 **Progression system** — earn XP by watching videos, hosting watch parties, and inviting friends; level up through 25 levels; unlock 17 achievements, 8 badges, and 7 rewards
+- 🎮 **Discord integration** — OAuth login, bot notifications via webhooks, Rich Presence via official RPC
+- 🖥️ **Desktop client** — Electron wrapper with native notifications, auto-update, global shortcuts, and application menu
+- 🔒 **Production security** — CSP, HSTS, X-Frame-Options, rate limiting, idempotency keys, session token hashing
+- ♿ **Accessibility** — ARIA tablist pattern, skip-to-content link, keyboard navigation, error boundary
+- 🧪 **Tested** — 25 unit tests, lint, typecheck, production build validation
 
-The app currently uses one custom credentials-based authentication system:
+## Quick start (local development)
 
-- `users` stores email + bcrypt password hash.
-- `profiles` stores one editable profile per user.
-- `sessions` stores hashed opaque session tokens.
-- Auth cookies are httpOnly and managed server-side.
-- Email verification and password reset tokens are stored hashed in `verification_tokens`.
+### Prerequisites
 
-Do not add a parallel auth system without first resolving the architecture conflict in `AUDIT_LOG.md`.
+- Node.js 20+
+- PostgreSQL 15+
+- npm
 
-### Official YouTube integration
-
-The YouTube feature uses only official YouTube services:
-
-- **YouTube Data API v3** provides search and video metadata.
-- **YouTube IFrame Player API** provides in-app playback at `/watch/[id]`.
-- The browser plays directly from YouTube's embedded player. The application never downloads, stores, transforms, or proxies video bytes.
-- Search result cards, watch-history cards, and the player include links back to YouTube.
-
-Required server-side environment variable:
+### 1. Clone and install
 
 ```bash
-YOUTUBE_API_KEY=your_youtube_data_api_key
+git clone https://github.com/Dragxon4000/you2ube.git
+cd you2ube
+npm install
 ```
 
-No YouTube API key is exposed to the browser. If the key is unavailable or the API is unavailable, routes return a clear safe error and the UI remains usable.
+### 2. Set up the database
 
-#### Data API quota safeguards
-
-The Data API has default quotas that are subject to change. As of the official Google documentation cited during implementation, the default project allocation includes 100 `search.list` calls/day and 10,000 units/day for other endpoints.
-
-The app reduces quota usage by:
-
-- Caching search responses for 5 minutes.
-- Fetching result metadata in one batched `videos.list` request.
-- Caching single-video metadata and trending responses for 10 minutes.
-- Limiting each local user/IP to six search attempts per minute.
-- Returning `429` with `Retry-After` for local throttling and official quota/rate-limit responses.
-- Avoiding automatic pagination or background polling.
-
-The local limiter is intentionally best-effort. A horizontally scaled deployment should replace it with a shared Redis or edge rate-limit store. Monitor actual YouTube quota in Google Cloud Console and complete YouTube’s audit/quota-extension process before requesting more capacity.
-
-#### Playback and continue watching
-
-Authenticated users can:
-
-- Search YouTube and inspect title, channel, thumbnail, duration, view count, and publish date.
-- Play the selected video in `/watch/[id]` through the official IFrame Player API.
-- Save playback position every 15 seconds, on pause, on playback completion, and when leaving the page.
-- Continue a video from its most recently saved position.
-- Open the original YouTube watch page at any time.
-
-`watch_sessions.watched_seconds` records the furthest observed timestamp. `watch_sessions.resume_position_seconds` stores the exact resume timestamp. One row is enforced for every user/video pair.
-
-### Supabase Storage and Realtime
-
-Supabase is used for avatar object storage and social realtime transport. Identity remains the existing custom application auth system; Supabase Auth is intentionally not used.
-
-The server uses one shared Supabase admin client for Storage and Realtime. Social mutations follow:
-
-```text
-Browser → authenticated Next.js API route → Drizzle/PostgreSQL → Supabase Realtime Broadcast
-```
-
-The server broadcasts only a non-sensitive invalidation event to a user-scoped channel. The browser then refetches private rows through the authenticated API route. This avoids relying on `auth.uid()` or exposing social rows to an anonymous Supabase client.
-
-Required for server Storage/Re​​altime broadcasts:
+Start a local Postgres instance (Docker example):
 
 ```bash
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+docker run -d --name you2ube-db \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_DB=app_db \
+  -p 5432:5432 \
+  postgres:15
 ```
 
-Required for browser Realtime subscriptions:
+### 3. Configure environment
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_publishable_or_anon_key
+cp .env.example .env
+# Edit .env and set DATABASE_URL if different from the default
 ```
 
-If the browser Realtime configuration is absent or unavailable, the social UI uses authenticated polling as a graceful fallback. The database migration adds social tables to the `supabase_realtime` publication when that publication exists on a Supabase-hosted database.
-
-### Supabase Storage avatars
-
-Supabase Storage continues to provide avatar object storage only. Identity remains the existing application auth system.
-
-Required for avatar uploads:
+### 4. Apply migrations
 
 ```bash
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-SUPABASE_AVATAR_BUCKET=avatars
-```
-
-The avatar bucket should exist in Supabase Storage. The app uploads files server-side using the service role key and stores the resulting public URL/path in `profiles.avatar_url` and `profiles.avatar_path`.
-
-Supported avatar file types:
-
-- JPEG
-- PNG
-- WebP
-- GIF
-
-Maximum size: 2 MB.
-
-## Database migrations
-
-Schema is defined in `src/db/schema.ts` and pushed with Drizzle Kit.
-
-SQL migrations retained in the repository:
-
-```bash
-drizzle/0001_profile_system.sql
-drizzle/0002_youtube_playback.sql
-drizzle/0003_social_system.sql
-drizzle/0004_social_rls_policies.sql
-drizzle/0005_social_hardening_realtime.sql
-```
-
-Apply schema changes in local development with:
-
-```bash
+npx drizzle-kit migrate
+# OR (dev only, non-destructive push):
 npx drizzle-kit push
 ```
 
-The playback migration adds `resume_position_seconds`, removes legacy duplicate user/video history records by retaining the latest row, and creates a composite unique index for `(user_id, video_id)`.
-
-The social migrations add canonical `sender_id`/`receiver_id` requests, one-row canonical `user_a`/`user_b` friendships, JSONB activities, complete presence state, indexes/constraints, RLS write protection, and Supabase Realtime publication membership.
-
-## Important routes
-
-### Pages
-
-- `/` — landing page
-- `/signup` — account creation
-- `/login` — login
-- `/dashboard` — protected app dashboard and continue-watching history
-- `/watch/[id]` — protected official YouTube embedded player
-- `/profile` — protected profile editor
-- `/users/[id]` — public profile page honoring privacy settings
-- `/social` — protected internal friends, presence, activity feed, and history
-- `/forgot-password` — password reset request
-- `/reset-password` — password reset form
-- `/verify-email` — email verification
-
-### API
-
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `GET /api/auth/me`
-- `POST /api/auth/forgot-password`
-- `POST /api/auth/reset-password`
-- `POST /api/auth/verify-email`
-- `POST /api/auth/resend-verification`
-- `GET /api/profile`
-- `PATCH /api/profile`
-- `POST /api/profile/avatar`
-- `DELETE /api/profile/avatar`
-- `GET /api/youtube/search`
-- `GET /api/youtube/trending`
-- `GET /api/youtube/video/[id]`
-- `GET /api/watch`
-- `POST /api/watch`
-- `GET /api/xp`
-- `GET /api/social/friends`
-- `POST /api/social/friends/request`
-- `POST /api/social/friends/remove`
-- `POST /api/social/requests/[id]/accept`
-- `POST /api/social/requests/[id]/reject`
-- `POST /api/social/requests/[id]/cancel`
-- `GET /api/social/feed`
-- `GET /api/social/activity`
-- `POST /api/social/presence`
-- `GET /api/social/presence`
-- `GET /api/social/users/search`
-- `GET /api/health`
-
-## Validation
-
-Run before finishing changes:
+### 5. Run the dev server
 
 ```bash
-npx next typegen
-npm exec tsc -- --noEmit --pretty false
-npm run build
+npm run dev
+# Open http://localhost:3000
 ```
 
-Then run the platform `build_and_start` validation.
+## Available scripts
 
-### Social system
+| Command | What it does |
+|---|---|
+| `npm run dev` | Next.js dev server at `:3000` |
+| `npm run build` | Production build |
+| `npm run start` | Run the production build |
+| `npm run lint` | ESLint |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm test` | Run unit tests (node:test + tsx) |
+| `npm run electron:dev` | Desktop client in dev mode (Next.js + Electron together) |
+| `npm run electron:build` | Package desktop client for current platform |
 
-you2ube includes an internal social system. It does not use Discord friends and does not add Supabase Auth:
+## Desktop client
 
-- Send, accept, reject, and cancel friend requests.
-- Remove friends.
-- Canonical one-row friendships prevent duplicate relationships.
-- Online/away/offline presence with last-seen timestamps.
-- Current video ID and title while watching, plus an optional custom status.
-- Friends activity feed and private user activity history.
-- Automatic `watch_start`, `watch_complete`, `friend_added`, and `level_up` events.
-- An idempotent server achievement unlock helper emits `achievement_unlock` events.
+See [`docs/DESKTOP.md`](docs/DESKTOP.md) for full details on the Electron wrapper, packaging, and code signing.
 
-Authenticated API endpoints live under `/api/social/*`. Social data is stored directly in PostgreSQL and protected by the existing httpOnly session cookie, server ownership checks, PostgreSQL foreign keys/cascades, uniqueness constraints, and RLS policies that deny direct client writes.
+Quick commands:
 
-Supabase Realtime is used for user-scoped Broadcast invalidation events after successful database writes. The browser never receives private social rows from Realtime; it refetches through authorized Next.js API routes. Configure `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` for the browser subscription and `SUPABASE_URL` plus `SUPABASE_SERVICE_ROLE_KEY` for server broadcasts. If Realtime is unavailable, authenticated polling remains active.
+```bash
+# Run desktop in dev mode
+npm run electron:dev
+
+# Package for current platform
+npm run electron:build
+
+# Package for specific platform
+./scripts/electron-build.sh --mac
+./scripts/electron-build.sh --win
+./scripts/electron-build.sh --linux
+```
+
+## Discord integration (optional)
+
+1. Create an application at https://discord.com/developers/applications
+2. Add an OAuth2 redirect URI: `${NEXT_PUBLIC_APP_URL}/api/auth/discord/callback`
+3. Enable the `identify` scope (no other scopes needed)
+4. Set `DISCORD_CLIENT_ID` and `DISCORD_CLIENT_SECRET` in `.env`
+5. (Optional) Create a webhook in a Discord channel and set `DISCORD_WEBHOOK_URL`
+
+See `src/lib/discord.ts` for the full list of official endpoints used.
+
+## Deployment
+
+### Vercel (recommended for web)
+
+1. Push to GitHub
+2. Import into Vercel
+3. Set environment variables from `.env.example` in Vercel's dashboard
+4. Deploy
+
+### Self-hosted
+
+```bash
+npm ci
+npm run build
+# Apply migrations against your production DB
+DATABASE_URL=<your-prod-url> npx drizzle-kit migrate
+# Start
+DATABASE_URL=<your-prod-url> npm start
+```
+
+### Docker
+
+No Dockerfile is included. A minimal one would look like:
+
+```dockerfile
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/drizzle ./drizzle
+EXPOSE 3000
+CMD ["npm", "start"]
+```
+
+## Project structure
+
+```
+you2ube/
+├── drizzle/                    # Versioned SQL migrations
+├── electron/                   # Electron main + preload
+│   ├── main.ts                 # Main process
+│   ├── preload.ts              # Typed bridge to renderer
+│   └── tsconfig.json           # Separate TS config for Electron
+├── scripts/                    # Shell scripts (electron-dev.sh, electron-build.sh)
+├── src/
+│   ├── app/                    # Next.js App Router
+│   │   ├── api/                # API routes
+│   │   │   ├── actions/        # XP-granting actions (watch, host-party, invite-friend)
+│   │   │   ├── auth/discord/   # Discord OAuth flow
+│   │   │   ├── achievements/   # Achievement list
+│   │   │   ├── badges/         # Badge list
+│   │   │   ├── health/         # Health check
+│   │   │   ├── leaderboard/    # Top users by XP
+│   │   │   ├── notifications/  # User notifications
+│   │   │   ├── profile/        # Current user profile
+│   │   │   ├── rewards/        # Reward list + claim
+│   │   │   └── videos/         # Video catalog
+│   │   ├── global-error.tsx    # Global error boundary
+│   │   ├── layout.tsx          # Root layout
+│   │   ├── not-found.tsx       # 404 page
+│   │   ├── page.tsx            # Home page (tabbed dashboard)
+│   │   ├── robots.ts           # robots.txt
+│   │   └── sitemap.ts          # sitemap.xml
+│   ├── components/             # React components
+│   ├── db/
+│   │   ├── index.ts            # Drizzle client
+│   │   ├── schema.ts           # Database schema
+│   │   └── seed.ts             # Idempotent seed data
+│   ├── lib/
+│   │   ├── api-helpers.ts      # Auth wrapper, rate limiting, error helpers
+│   │   ├── desktop.ts          # Electron renderer bridge
+│   │   ├── discord-rpc.ts      # Discord Rich Presence client
+│   │   ├── discord.ts          # Discord OAuth + webhooks
+│   │   ├── progression.ts      # XP/achievements/badges/rewards engine
+│   │   ├── session.ts          # Session management
+│   │   └── validate-env.ts     # Env var validation at startup
+│   └── instrumentation.ts      # Next.js startup hook
+└── AUDIT_LOG.md                # Full development history
+```
+
+## Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run with verbose output
+npm test -- --test-reporter spec
+
+# Run specific test file
+node --test --import tsx src/__tests__/validators.test.ts
+```
+
+## Security
+
+The app implements:
+
+- **Session token hashing** — full 48-char cookie is SHA-256 hashed and stored; cookie is validated on every request using constant-time comparison
+- **CSRF protection** — `SameSite=lax` cookie + OAuth state token with timing-safe comparison
+- **Rate limiting** — per-IP session creation limits + per-user action rate limits with IETF standard headers
+- **Idempotency keys** — prevents double-XP on retries
+- **Security headers** — CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy
+- **Input validation** — strict validators on all API inputs
+- **SQL injection prevention** — Drizzle ORM parameterizes all queries
+- **Transaction safety** — XP grants use `SELECT ... FOR UPDATE` + atomic updates
+
+## Audit history
+
+See [`AUDIT_LOG.md`](AUDIT_LOG.md) for the full development history including:
+
+- Phase 6: Progression system
+- Phase 6.5: Production hardening
+- Phase 7: Discord integration
+- Phase 8: Desktop client
+- Phase 9: Production audit
+- Full repository audit with evidence-based bug verification
+- Production polish pass (security fixes + improvements)
+
+## License
+
+Private. See the original repository for licensing.
